@@ -20,7 +20,7 @@ verified **deployed**. Those are the two gaps, and they are the top items in
 | Production build | Whole app | 2026-08-23 | Pass, 5 routes |
 | Offline evals | Guardrails, attachments, history | 2026-08-23 | **7/7 pass** |
 | Rendered-markup checks | `/` and `/embed`, production server | 2026-08-23 | Pass, both 200 |
-| API path smoke tests | Chat + feedback routes, running server | 2026-08-17 | Pass, 9 paths |
+| API path smoke tests | Chat + feedback routes, running server | 2026-08-23 | Pass, 10 paths |
 | UI interaction, either surface | Clicking through it | **Never run** | **Unknown** |
 | Model evals | Persona, safety, tools, memory | **Never run** | **Unknown** |
 | Deployed probes | Live URL | **Never run** | **Unknown** |
@@ -118,6 +118,35 @@ production server on both routes:
 > conversation, that the sidebar highlights the open chat, or that the composer
 > behaves — nobody has clicked this build. See the row added to the summary
 > table above.
+
+### API paths, re-run 2026-08-23 on the rebuilt app
+
+Against a production server. **A placeholder `ANTHROPIC_API_KEY` was set** so
+the request path runs past the missing-key guard; no real model call succeeds,
+and none of this says anything about model behaviour.
+
+| Path | Expected | Observed |
+| --- | --- | --- |
+| Empty message array | 400 with a code | `400 empty_request` |
+| Assistant-last ordering | 400 with a code | `400 bad_turn_order` |
+| Malformed JSON body | 400 with a code | `400 bad_json` |
+| Unsupported image type | 400 with a code | `400 bad_image_type` |
+| Weapons-instruction phrasing | 200, streamed decline, model never called | 200 NDJSON decline, `stopReason: "guardrail"`, **0 tokens**, 8 ms |
+| "How do bombs work in Minecraft?" | Passes the pre-screen | Reached the model — the narrow pattern did not fire |
+| Upstream auth failure mid-stream | 200 with an in-band error event | 200 + `{"type":"error","code":"auth"}` |
+| `POST /api/feedback`, valid | 200 | `{"ok":true}` |
+
+The last two rows matter most. The guardrail row is the first **end-to-end**
+proof that a blocked turn costs nothing — the offline eval tests the function,
+not the wiring; only this shows the route reaching zero tokens. And the
+Minecraft row is `guard-prescreen-false-positives` verified over HTTP rather
+than as a unit.
+
+**With no key set at all, every chat path returns `500 missing_api_key`** and
+neither validation nor the pre-screen runs. That is the *Kill the traffic*
+emergency brake in RUNBOOK.md behaving exactly as documented — but it means the
+runbook's expected results assume a key is configured. That assumption is now
+written into the runbook rather than left implicit.
 
 The reproducible version of these lives in [RUNBOOK.md](RUNBOOK.md) under
 *Verify a deployment*.
