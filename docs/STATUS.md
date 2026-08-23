@@ -1,0 +1,309 @@
+# STATUS — AskPBot
+
+_Dated decision log. Newest entry first._
+
+---
+
+## How to keep this file
+
+Append an entry **on every working session**, on the day it happened. Half of
+what the mid-capstone review looks at is this log, and a reviewer can tell the
+difference between a log written as the work happened and one assembled the
+night before.
+
+Rules that keep it honest:
+
+- **Never backdate.** If a session went unlogged, add it today with a note
+  saying what it covers. A gap that is explained is fine; an invented date is
+  not.
+- **Record decisions, not activity.** "Chose X over Y because Z" is the useful
+  unit. "Worked on the panel" is not.
+- **Record reversals too.** A decision that was undone is more informative than
+  one that stuck.
+- **Blockers get logged when they appear**, not when they are solved.
+
+Entry shape: **Done / Decided / Blocked / Next**.
+
+---
+
+## Open blockers
+
+| # | Blocker | Raised | Owner | Needed by |
+| --- | --- | --- | --- | --- |
+| 1 | **No Anthropic API key.** Nothing has ever run against the real model — the 12 model evals have not been executed once. | 2026-08-17 | Me | Before any deploy |
+| 2 | **Platform conflicts with the brief.** Built for Vercel; the capstone requires AWS or Cloudflare. | 2026-08-23 | Me + mentor | Mid-capstone review |
+| 3 | **N8N and MCP requirements unmet.** No workflow, no MCP server. | 2026-08-23 | Me | Mid-capstone review |
+| 4 | **Deadline dates unknown.** SCOPE.md cannot name a ship date. | 2026-08-23 | Mentor | Immediately |
+| 5 | **Not on GitHub.** Repo is local only; nothing pushed. | 2026-08-23 | Me | This week |
+
+---
+
+## 2026-08-23 (evening) — The web layout replaces the panel
+
+**Done**
+
+- Received the source UI extract (Blade markup, the Alpine state machine, the
+  compiled `.pbot-*` CSS) and diffed it against the port for the first time.
+- Found the extract is the **`pbot-web` variant** — two columns, persistent
+  history sidebar — while the port targeted the **`pbot-panel`** variant. The
+  stylesheet ships both; only one was built.
+- Rebuilt `/` as the web layout: `PBotWeb`, plus `PBotHistory` (extracted so the
+  list exists once, not twice), `PBotSuggestions`, `PBotPodium`.
+- Moved the docked panel to `/embed`, working and routed.
+- Ported the starter prompt chips and the composer's corner-radius steps.
+- Extracted `useIsHydrated` out of `PBotPanel` into its own module; both
+  surfaces need it.
+- Verified: typecheck, lint, 7/7 offline evals, production build (5 routes), and
+  both routes served from a real production server with their markers asserted
+  in the returned HTML.
+
+**Decided**
+
+- **The panel is retained, not deleted.** `pbot-open` is named a public contract
+  in `CLAUDE.md`, and an unrendered component rots. Giving it a route keeps it
+  exercised for the cost of one page. Cutting it is now item 2 on the cut list
+  rather than a decision made silently today.
+- **One state machine, two shells.** `usePBot` gained a `mode` of `panel` or
+  `page` rather than being forked. `page` starts open, skips the body-scroll
+  lock, and skips the Escape handler — a page that locks its own scroll is
+  unusable, which is the bug that fork would have hidden.
+- **`startChatWith` exists because React is not Alpine.** The source does
+  `newChat(); usePrompt(s)` and relies on synchronous state. Here `send` closes
+  over `messages`, so the chip would have sent the question with the *previous*
+  conversation's history. One call that builds the turn itself avoids the stale
+  closure rather than papering over it.
+- **History is seeded in `useState`, not an effect.** React 19's lint flagged
+  the effect version as a cascading render — the same rule already recorded
+  against the SSR mount guard. `PBotWeb` gates the list on `useIsHydrated` so
+  the server and the first client paint agree.
+- **Four source behaviours are dropped, on the record.** Gaze-follow, poof-open,
+  and `ds-scroll` are in `SCOPE.md` with reasons. The podium rise is built; the
+  mascot inside it is still a placeholder.
+
+**Blocked**
+
+- No new blockers. Blocker 5 (nothing on GitHub) now covers materially more
+  unbacked-up work than it did this morning.
+
+**Found**
+
+- **The missing assets resolve to five files.** The extract gives real paths:
+  `mascot/pbot-awe.svg`, `mascot/pbot.svg`, `askpbot/podium.svg`,
+  `askpbot/podium-stage.svg`, and `bg-ellipse.svg`. The tab PNGs and the modal
+  mascots went with Math Drill. `README.md` also named `rive/pbot.riv` as the
+  swap point; the extract renders `pbot.svg`, so Rive is not required.
+
+**Next**
+
+1. Unchanged and unstarted: deadline dates, mentor conversation, GitHub, API
+   key, first full eval run, deploy.
+2. Retrieval still sits behind all of the above.
+
+---
+
+## 2026-08-23 (later) — Live web retrieval re-scoped in, build deferred
+
+**Done**
+
+- Assessed an incoming brief for an autonomous web-retrieval assistant against
+  the existing system. Found the bulk of its stack already unnecessary here:
+  Anthropic's `web_search_20260209` / `web_fetch_20260209` are server tools on
+  `claude-sonnet-5`, which removes the crawler, the HTML-to-markdown step, the
+  chunker, the embedding model, the vector store, and the reranker.
+- Wrote the re-scope into `SCOPE.md`: one amended not-building line, two new
+  ones, an in-scope row marked unbuilt, a new first entry in the cut list, and
+  a re-scope log row.
+- Recorded the design in `TECHNICAL-PLAN.md` under a heading that marks it as
+  planned and unbuilt.
+
+**Decided**
+
+- **Retrieval is a tool, not an identity.** PBot keeps the persona and stays
+  general-purpose. It reaches for the web when an answer depends on current
+  information and cites what it used. Rejected the alternative of rebuilding
+  the product around grounding, which would have invalidated the definition of
+  done and most of the eval suite six weeks in.
+- **Server tools over a self-hosted pipeline.** The brief asks for a
+  self-hosted vector stack; that objective is knowingly not met. Buying it
+  costs a second deployable, an embeddings provider, and a second production
+  failure mode, against a `SCOPE.md` rule that deployment is never cut. Written
+  up rather than quietly skipped.
+- **Two capabilities from the brief are dropped, not deferred**, because the
+  server tools cannot express them honestly: cache-drift telemetry
+  ("cached 12 hrs ago") and a force-re-crawl trigger. The UI will claim only
+  what it can observe.
+- **No graph framework.** The "multi-hop query planner" is the existing loop in
+  `lib/agent.ts` running more than one iteration. `MAX_TOOL_ITERATIONS` moves
+  from 4 to 6; nothing else is needed. Reaffirmed the not-building line.
+- **Build sequenced after deployment.** Blockers 1, 2 and 5 clear first. A
+  first production deploy carrying both a never-executed model path and a
+  brand-new retrieval path has two suspects when it breaks.
+
+**Blocked**
+
+- No new blockers. The existing five all still gate this work: it cannot be
+  verified at all until blocker 1 clears, since every retrieval path runs
+  server-side and none of it is exercisable offline.
+
+**Risk logged**
+
+- **Retrieval is a prompt-injection surface, and the current guardrails do not
+  cover it.** Fetched pages are third-party text entering the model's context.
+  `SCOPE.md` already refuses markdown rendering on injection grounds; this is
+  the same argument applied to a larger surface. Mitigations are specified in
+  `TECHNICAL-PLAN.md` and must ship with the feature, not after it.
+
+**Next**
+
+1. Unchanged — deadline dates, mentor conversation on blockers 2 and 3, GitHub
+   repo, API key, first full eval run.
+2. Only then: implement retrieval per the plan.
+
+---
+
+## 2026-08-23 — Docs pack, and a toolchain conflict surfaced
+
+**Done**
+
+- Wrote the docs pack: `PROJECT.md`, `SCOPE.md`, `TECHNICAL-PLAN.md`,
+  `RELIABILITY.md`, `RUNBOOK.md`, and this file. Updated `CLAUDE.md` to point
+  at them.
+- Audited the capstone checklist against what actually exists.
+- Drafted candidate repo names; nothing chosen yet.
+
+**Decided**
+
+- **The docs record reality, not intent.** Anything unbuilt is marked unbuilt.
+  Deployment sections in the runbook carry a "not yet run" marker until the
+  first real deploy, so no command in this repo is one nobody has executed.
+- **Added `RELIABILITY.md` beyond the required five files.** Reliability checks
+  are a named deliverable in the brief and deserved their own page rather than
+  being buried in the runbook.
+- **Scope holds.** Re-read the not-building list against what got built. Auth,
+  RAG, Math Drill, markdown rendering, and server-side history sync are all
+  still absent, as promised. No scope leak to report.
+
+**Blocked**
+
+- **Blocker 2 — platform.** The kickoff product brief said Vercel; the capstone
+  brief says AWS or Cloudflare. These cannot both be satisfied. Options written
+  up in TECHNICAL-PLAN.md; recommending Cloudflare Workers via
+  `@opennextjs/cloudflare` because a Cloudflare account already exists from
+  Week 0 and KV would also retire the rate-limiter debt.
+- **Blocker 3 — N8N and MCP.** Both unmet. Proposed non-decorative uses: N8N for
+  scheduled reliability probes against the deployed URL, MCP for an eval/log
+  server usable from Claude Code. Roughly half a day each.
+- **Blocker 4 — dates.** SCOPE.md has a placeholder where the ship date belongs.
+  This is the one field that cannot be inferred, and the cut list depends on it.
+
+**Next**
+
+1. Get the deadline dates and fill SCOPE.md.
+2. Take blockers 2 and 3 to the mentor. A platform change is a re-scope and
+   needs to be written into SCOPE.md, agreed.
+3. Create the GitHub repo and push.
+4. Get an API key and run the full eval suite for the first time.
+
+---
+
+## 2026-08-17 (afternoon) — Ported the real AskPBot panel
+
+**Done**
+
+- Received the design and functionality extract from the Pandai student-UI repo
+  (Blade markup, the Alpine state machine, and the `.pbot-*` CSS).
+- Ported the panel to React: `PBotPanel`, `PBotHome`, `PBotChat`, `PBotTurn`,
+  `PBotComposer`, `PBotMascot`, and `usePBot` as the state machine.
+- Ported the CSS with its tokens resolved to the literal brand values.
+- Replaced the source's two mocks with working implementations: the `setTimeout`
+  in `send()` became a real streaming turn, and the hardcoded history array
+  became `localStorage` persistence with the same date grouping.
+- Added image attachment end to end, plus `POST /api/feedback` so the thumbs-up
+  button produces a real signal.
+- Deleted the previous full-page chat UI it replaced.
+- Verified: typecheck clean, lint clean, production build passes, 7/7 offline
+  evals, and API paths exercised against a running server.
+
+**Decided**
+
+- **`/` became a demo host page.** A docked panel needs something to dock over,
+  and deployed standalone there is nothing. The page stands in for a host app
+  and doubles as documentation of the one-event integration.
+- **Dropped Math Drill and the tab switcher.** The source extract recommends it
+  for a general-purpose bot, and a switcher with one tab is chrome. Logged as a
+  scope change in SCOPE.md.
+- **Substituted rather than faked the missing assets.** Tab PNGs went with the
+  tabs, `bg-ellipse.svg` became an inline gradient at the same `#30A9E5`, and
+  the mascot and avatar are emoji placeholders with marked swap points. Better
+  a labelled placeholder than a lookalike that reads as finished.
+- **Panel keeps brand colours in dark mode.** It floats over a host app whose
+  theme it does not control.
+- **Images are not persisted.** Base64 against a 5MB quota would evict the whole
+  history after two screenshots. Saved turns keep a marker instead.
+- **Regenerate only on the last turn.** Regenerating mid-conversation discards
+  everything after it, and a destructive action should not sit behind an icon
+  identical to the safe ones beside it.
+
+**Blocked**
+
+- Still blocker 1: no API key, so image understanding has been verified only as
+  far as the API boundary — validation and request construction, not a real
+  vision response.
+
+**Next**
+
+- Docs pack.
+
+---
+
+## 2026-08-17 (morning) — Scaffold and core build
+
+**Done**
+
+- Scaffolded Next.js 16 / React 19 / TypeScript / Tailwind v4 via
+  `create-next-app`.
+- Built the core: `lib/agent.ts` (streaming plus tool loop), `app/api/chat`,
+  the persona in `lib/prompt.ts`, guardrails, an in-memory rate limiter,
+  structured logging, and a `get_current_time` tool.
+- Wrote the eval suite: 5 offline cases plus 12 model cases.
+- Verified: typecheck, lint, production build, 5/5 offline evals, and a runtime
+  smoke test covering validation errors, a guardrail block, and an in-band
+  streaming error.
+
+**Decided**
+
+- **Official `@anthropic-ai/sdk` instead of the Vercel AI SDK**, against the
+  kickoff brief's recommendation. Per-turn token usage, the `refusal` stop
+  reason, and adaptive-thinking config all come off the raw response. Cost is
+  about 90 lines of stream-reading code. Flagged to the requester at the time.
+- **Refactored the model turn into `lib/agent.ts` mid-build** so the route and
+  the eval suite share one code path. Evals that reimplement model parameters
+  pass while production drifts.
+- **NDJSON over SSE** for the stream protocol.
+- **Two distinct error paths.** Pre-stream failures get a real HTTP status;
+  post-first-byte failures travel in-band, because the status is already locked
+  at 200.
+- **Kept the harmful-content pre-screen deliberately narrow**, and added
+  `guard-prescreen-false-positives` as an eval whose whole job is to fail if
+  someone later widens it. A broad blocklist mostly refuses legitimate users.
+- **`claude-sonnet-5` with adaptive thinking at `effort: medium`**, both
+  env-overridable.
+
+**Blocked**
+
+- **Blocker 1 raised: no Anthropic API key.** All verification to date is
+  local, offline, or stops at the API boundary.
+
+**Next**
+
+- Wire the real panel design once the extract arrives.
+
+---
+
+## Before 2026-08-17
+
+Planning conversation only: product shape, audience, deployment target, and the
+differentiating feature. No code. Superseded by the kickoff brief on 2026-08-17,
+which changed the product from a grounded document-Q&A bot to a general-purpose
+assistant and moved the platform from Cloudflare to Vercel. Both changes are
+recorded in the SCOPE.md re-scope log.
