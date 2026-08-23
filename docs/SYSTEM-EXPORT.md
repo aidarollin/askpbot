@@ -311,7 +311,7 @@ Every file, verbatim, as generated from the working tree.
 ### 6.1 Project files
 
 #### `package.json`  
-_34 lines_
+_40 lines_
 
 ```json
 {
@@ -319,15 +319,19 @@ _34 lines_
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
     "build": "next build",
+    "dev": "next dev",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "eval": "tsx evals/run.ts",
     "eval:offline": "tsx evals/run.ts --offline",
     "check": "npm run typecheck && npm run lint && npm run eval:offline",
-    "export:refresh": "node scripts/inline-export.mjs"
+    "export:refresh": "node scripts/inline-export.mjs",
+    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",
+    "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
@@ -336,6 +340,7 @@ _34 lines_
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@opennextjs/cloudflare": "^1.20.2",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -345,9 +350,87 @@ _34 lines_
     "eslint-config-next": "16.3.1",
     "tailwindcss": "^4",
     "tsx": "^4.23.12",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wrangler": "^4.125.0"
   }
 }
+```
+
+#### `next.config.ts`  
+_23 lines_
+
+```ts
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  /* config options here */
+};
+
+export default nextConfig;
+
+/**
+ * Makes Cloudflare bindings available to `next dev`.
+ *
+ * The adapter's scaffold emits this call unguarded, which is wrong: Next loads
+ * this file for `next build` as well as `next dev`, so an unguarded call spawns
+ * a `workerd` process on every build. Those processes outlive the build and
+ * hold an open handle on `.open-next`, so the *next* build dies with
+ * `EPERM ... rm .open-next` — a failure that reads like a permissions problem
+ * and is actually a leaked child process.
+ *
+ * `next dev` sets NODE_ENV to development; `next build` sets it to production.
+ */
+if (process.env.NODE_ENV === "development") {
+  void import("@opennextjs/cloudflare").then((m) => m.initOpenNextCloudflareForDev());
+}
+```
+
+#### `wrangler.jsonc`  
+_27 lines_
+
+```text
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"main": ".open-next/worker.js",
+	"name": "askpbot",
+	"compatibility_date": "2026-08-23",
+	"compatibility_flags": [
+		"nodejs_compat",
+		"global_fetch_strictly_public"
+	],
+	"assets": {
+		"directory": ".open-next/assets",
+		"binding": "ASSETS"
+	},
+	"services": [
+		{
+			// Self-reference service binding, the service name must match the worker name
+			// see https://opennext.js.org/cloudflare/caching
+			"binding": "WORKER_SELF_REFERENCE",
+			"service": "askpbot"
+		}
+	],
+	"images": {
+		// Enable image optimization
+		// see https://opennext.js.org/cloudflare/howtos/image
+		"binding": "IMAGES"
+	}
+}
+```
+
+#### `open-next.config.ts`  
+_9 lines_
+
+```ts
+// default open-next.config.ts file created by @opennextjs/cloudflare
+import { defineCloudflareConfig } from "@opennextjs/cloudflare";
+// import r2IncrementalCache from "@opennextjs/cloudflare/overrides/incremental-cache/r2-incremental-cache";
+
+export default defineCloudflareConfig({
+	// For best results consider enabling R2 caching
+	// See https://opennext.js.org/cloudflare/caching for more details
+	// incrementalCache: r2IncrementalCache
+});
 ```
 
 #### `.env.example`  
@@ -1029,7 +1112,7 @@ export function screenOutput(text: string): { leaked: boolean } {
 ```
 
 #### `lib/ratelimit.ts`  
-_76 lines_
+_79 lines_
 
 ```ts
 import { RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_MS } from "./config";
@@ -1037,13 +1120,14 @@ import { RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_MS } from "./config";
 /**
  * In-memory sliding-window rate limiter, keyed by client IP.
  *
- * Known limitation, stated plainly: this is per-instance. On Vercel each
- * serverless instance keeps its own counter, so the effective limit across N
- * warm instances is N x RATE_LIMIT_REQUESTS. That is fine for a demo whose
- * purpose is to stop one tab from hammering the API, and wrong for real abuse
- * prevention. The correct fix is a shared store (Vercel KV / Upstash Redis)
- * with the same interface — `check()` is deliberately shaped so that swap is a
- * one-file change.
+ * Known limitation, stated plainly: this is per-instance. Every isolate — a
+ * Cloudflare Worker instance here, a serverless instance elsewhere — keeps its
+ * own counter, so the effective limit across N warm instances is
+ * N x RATE_LIMIT_REQUESTS. That is fine for a demo whose purpose is to stop one
+ * tab from hammering the API, and wrong for real abuse prevention. The correct
+ * fix is a shared store with the same interface — Cloudflare KV or a Durable
+ * Object, now that Workers is the target — and `check()` is deliberately shaped
+ * so that swap is a one-file change.
  */
 
 const hits = new Map<string, number[]>();
@@ -1098,10 +1182,12 @@ export function check(key: string): RateLimitResult {
 }
 
 /**
- * Best-effort client identity. Behind Vercel's proxy the real client address is
- * the first entry of x-forwarded-for; `request.ip` is not available in the
- * Node runtime. Falls back to a shared bucket when no header is present, which
- * is the safe direction (over-limiting an unknown caller, not under-limiting).
+ * Best-effort client identity. Behind a platform proxy the real client address
+ * is the first entry of x-forwarded-for; `request.ip` is not available in the
+ * Node runtime. On Cloudflare, `cf-connecting-ip` is the more trustworthy
+ * header and is worth preferring once this actually runs there. Falls back to a
+ * shared bucket when no header is present, which is the safe direction
+ * (over-limiting an unknown caller, not under-limiting).
  */
 export function clientKey(headers: Headers): string {
   const forwarded = headers.get("x-forwarded-for");
@@ -1111,14 +1197,15 @@ export function clientKey(headers: Headers): string {
 ```
 
 #### `lib/log.ts`  
-_62 lines_
+_63 lines_
 
 ```ts
 /**
  * Structured per-turn logging.
  *
- * One JSON object per line to stdout. Vercel ingests stdout automatically, so
- * this gives queryable logs with no vendor SDK and no extra dependency. Swap
+ * One JSON object per line to stdout. Cloudflare's Workers Logs ingests console
+ * output automatically (as most platforms do), so this gives queryable logs with
+ * no vendor SDK and no extra dependency. Swap
  * `emit` for an OpenTelemetry exporter or a log drain later without touching
  * any call site.
  *
@@ -1330,7 +1417,7 @@ export function groupByDate(conversations: StoredConversation[]): HistoryGroup[]
 ### 6.3 API routes
 
 #### `app/api/chat/route.ts`  
-_214 lines_
+_221 lines_
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
@@ -1343,7 +1430,14 @@ import { encodeEvent, type ChatRequestBody, type StreamEvent } from "@/lib/types
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-/** Long enough for a slow multi-tool turn; Vercel's Hobby ceiling. */
+/**
+ * Vercel-only knob, and the deploy target is Cloudflare Workers — Workers
+ * ignores it. Kept because it is the correct value if this ever runs on Vercel
+ * again, and deleting it would silently lose that. Workers limits *CPU* time
+ * rather than wall clock, and a turn spends nearly all of its time waiting on
+ * the Anthropic API rather than computing, so a long stream is not the risk
+ * here. Unverified against a real multi-tool turn — see RELIABILITY.md.
+ */
 export const maxDuration = 60;
 
 /**
@@ -4892,7 +4986,8 @@ works.
 
 | Platform | Fit | Notes |
 | --- | --- | --- |
-| **Vercel** | Native | Zero-config import. `maxDuration = 60` is the Hobby ceiling. What the code currently assumes. |
+| **Cloudflare Workers** | Via `@opennextjs/cloudflare` | **The chosen target.** `wrangler.jsonc` and `open-next.config.ts` are committed; the worker builds and runs on `workerd`. `maxDuration` is ignored here — Workers limits CPU time, not wall clock. |
+| **Vercel** | Native | Zero-config import. `maxDuration = 60` is the Hobby ceiling. Kept as a working fallback; it is what the code assumed before 2026-08-23. |
 | **Cloudflare Workers** | Good, via adapter | `@opennextjs/cloudflare`. Duration semantics differ — re-verify streaming after the move. KV makes shared rate limiting nearly free (§9). |
 | **AWS** | Workable | Lambda + API Gateway needs care with response streaming; Amplify Hosting is simpler. Heaviest IAM surface. |
 | **Container (Docker + anything)** | Simplest to reason about | `next build && next start`. No platform timeout ceiling. Most portable. |

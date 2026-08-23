@@ -23,6 +23,8 @@ verified **deployed**. Those are the two gaps, and they are the top items in
 | API path smoke tests | Chat + feedback routes, running server | 2026-08-23 | Pass, 10 paths |
 | UI interaction, either surface | Clicking through it | **Never run** | **Unknown** |
 | Model evals | Persona, safety, tools, memory | **Never run** | **Unknown** |
+| Cloudflare worker build | `opennextjs-cloudflare build` | 2026-08-23 | Pass |
+| Workers-runtime behaviour | `wrangler dev` on `workerd` | 2026-08-23 | Pass, 8 paths |
 | Deployed probes | Live URL | **Never run** | **Unknown** |
 
 ---
@@ -151,7 +153,42 @@ written into the runbook rather than left implicit.
 The reproducible version of these lives in [RUNBOOK.md](RUNBOOK.md) under
 *Verify a deployment*.
 
-## Layer 5 — Deployed probes
+## Layer 5 — The Workers runtime
+
+The deploy target is Cloudflare Workers, whose runtime is `workerd`, not Node.
+A Node dev server cannot tell you whether the app survives that move, so the
+worker was built and run locally on the real runtime before the platform choice
+was committed.
+
+```bash
+npx opennextjs-cloudflare build
+npx opennextjs-cloudflare preview -- --port 8788
+```
+
+| Path | Expected | Observed on `workerd` |
+| --- | --- | --- |
+| `GET /` | Web layout renders | 200; sidebar, chips and podium markers present |
+| `GET /embed` | Panel demo renders | 200 |
+| Empty message array | 400 with a code | `400 empty_request` |
+| Malformed JSON body | 400 with a code | `400 bad_json` |
+| **Weapons-instruction phrasing** | **Streamed NDJSON decline** | 200, both events streamed, `stopReason: "guardrail"`, 0 tokens |
+| **Upstream auth failure** | **In-band error event, status stays 200** | 200 + `status` then `{"type":"error","code":"auth"}` |
+| `POST /api/feedback` | 200 | `{"ok":true}` |
+
+The two bold rows are the point of this layer. `TECHNICAL-PLAN.md` flagged that
+moving off Vercel meant the streaming route needed re-verifying, because that is
+the part most likely to break on a different runtime. It does not break: NDJSON
+streaming and the post-first-byte error path both behave exactly as they do
+under Node.
+
+> **What this does not prove.** The streams tested are short and synthetic — a
+> guardrail decline is two events and eight milliseconds. A real model turn runs
+> for seconds, may loop through tool calls, and has never been executed on any
+> runtime. Workers limits CPU time rather than wall clock, and a turn spends
+> almost all of its time waiting on the Anthropic API rather than computing, so
+> this is expected to be fine — **expected, not measured.**
+
+## Layer 6 — Deployed probes
 
 **Not built.** The plan is an N8N workflow on a schedule that hits the deployed
 chat endpoint with a fixed probe set, asserts a streamed reply and a successful

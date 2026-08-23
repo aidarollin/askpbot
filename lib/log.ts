@@ -1,8 +1,9 @@
 /**
  * Structured per-turn logging.
  *
- * One JSON object per line to stdout. Vercel ingests stdout automatically, so
- * this gives queryable logs with no vendor SDK and no extra dependency. Swap
+ * One JSON object per line to stdout. Cloudflare's Workers Logs ingests console
+ * output automatically (as most platforms do), so this gives queryable logs with
+ * no vendor SDK and no extra dependency. Swap
  * `emit` for an OpenTelemetry exporter or a log drain later without touching
  * any call site.
  *

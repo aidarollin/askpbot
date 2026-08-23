@@ -31,10 +31,68 @@ Entry shape: **Done / Decided / Blocked / Next**.
 | # | Blocker | Raised | Owner | Needed by |
 | --- | --- | --- | --- | --- |
 | 1 | **No Anthropic API key.** Nothing has ever run against the real model — the 12 model evals have not been executed once. | 2026-08-17 | Me | Before any deploy |
-| 2 | **Platform conflicts with the brief.** Built for Vercel; the capstone requires AWS or Cloudflare. | 2026-08-23 | Me + mentor | Mid-capstone review |
+| 2 | **Platform** — resolved in configuration 2026-08-23: Cloudflare Workers via `@opennextjs/cloudflare`, built and verified locally on `workerd`. **Still needs mentor sign-off, and the deploy itself has not been run.** | 2026-08-23 | Me + mentor | Mid-capstone review |
 | 3 | **N8N and MCP requirements unmet.** No workflow, no MCP server. | 2026-08-23 | Me | Mid-capstone review |
 | 4 | **Deadline dates unknown.** SCOPE.md cannot name a ship date. | 2026-08-23 | Mentor | Immediately |
 | ~~5~~ | ~~**Not on GitHub.**~~ **Resolved 2026-08-23** — pushed to https://github.com/aidarollin/askpbot, `main` tracking `origin/main`. | 2026-08-23 | Me | Done |
+
+---
+
+## 2026-08-23 (night, later) — Cloudflare Workers, built and verified on workerd
+
+**Done**
+
+- Added `@opennextjs/cloudflare` 1.20.2 and `wrangler` 4.125.0. Checked the peer
+  range first: it wants `next >=16.2.11`, and this project is on 16.3.1.
+- Scaffolded via the adapter's own `migrate` command rather than hand-writing
+  config from memory — `wrangler.jsonc`, `open-next.config.ts`,
+  `public/_headers`, `.dev.vars`, plus `.gitignore` and script updates.
+- Built the worker, then **ran it on the real `workerd` runtime** and re-ran the
+  path checks there. Eight paths, all matching Node.
+- Fixed the route's `maxDuration` comment, which still named Vercel.
+
+**Decided**
+
+- **Cloudflare Workers, reversing the 2026-08-17 move to Vercel.** Logged in
+  `SCOPE.md`. Closes the capstone's platform requirement in configuration; the
+  mentor still has to agree and the deploy still has to happen.
+- **Verify on `workerd` before committing the platform, not after.** A Node dev
+  server cannot tell you whether the app survives a runtime change, and the
+  streaming route was the specific thing `TECHNICAL-PLAN.md` warned would need
+  re-verifying. It survives — NDJSON streaming and the in-band error path both
+  behave identically.
+
+**Found**
+
+- **`npm run check` broke the moment the worker was built** — 14,811 lint
+  problems, every one of them inside `.open-next/` and `.wrangler/` minified
+  output, none in real source. Added both to `eslint.config.mjs`'s ignore list.
+  Worth recording because the pre-commit gate silently became useless and the
+  failure looked like a catastrophe rather than a config gap.
+- **`.dev.vars` is a secrets file** and the adapter's `.gitignore` update covers
+  it (`.dev.vars*`). Confirmed with `git check-ignore` rather than assumed.
+- **The adapter's scaffold leaks a process on every build.** It writes
+  `initOpenNextCloudflareForDev()` into `next.config.ts` unguarded, but Next
+  loads that file for `next build` too — so each build spawns a `workerd` that
+  never exits and keeps `.open-next` open, and the *next* build fails with
+  `EPERM ... rm .open-next`. Presents as a permissions error; is a leaked child
+  process. Guarded on `NODE_ENV === "development"` and verified with three
+  consecutive clean builds. Recorded in `CLAUDE.md` because the symptom points
+  nowhere near the cause.
+
+**Blocked**
+
+- **The deploy needs `wrangler login`** — a browser OAuth flow against a
+  Cloudflare account. Not something this repo can perform.
+- Blocker 1 is unchanged and is still the binding constraint on *finishing*.
+
+**Next**
+
+1. `npx wrangler login`, `npx wrangler secret put ANTHROPIC_API_KEY`,
+   `npm run deploy`.
+2. Run the verify block against the live URL; fill the URL into `README.md` and
+   the runbook; clear the deploy markers.
+3. `npm run eval` against a real key.
 
 ---
 

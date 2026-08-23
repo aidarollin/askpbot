@@ -59,6 +59,18 @@ would hide exactly that difference until it shipped.
 old one, and the question goes up with the wrong history. `startChatWith` builds
 the turn itself for this reason.
 
+**Keep `initOpenNextCloudflareForDev()` guarded in `next.config.ts`.** The
+Cloudflare adapter's scaffold emits it unguarded, and Next loads that file for
+`next build` as well as `next dev` — so every build spawns a `workerd` that
+outlives it and holds `.open-next` open. The next build then dies with
+`EPERM ... rm .open-next`, which reads like a permissions problem and is a
+leaked child process. The `NODE_ENV === "development"` guard is load-bearing.
+
+**`.open-next/` and `.wrangler/` must stay in `eslint.config.mjs`'s ignore
+list.** They are generated and gitignored, but ESLint's flat config does not
+read `.gitignore`. Without the ignores, `npm run check` reports ~15,000 problems
+from minified vendor bundles and the pre-commit gate becomes useless noise.
+
 **Don't persist images.** `lib/history.ts` strips attachments before writing to
 localStorage on purpose: base64 images against a ~5MB quota would evict the
 whole history after two screenshots.

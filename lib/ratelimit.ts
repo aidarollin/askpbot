@@ -3,13 +3,14 @@ import { RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_MS } from "./config";
 /**
  * In-memory sliding-window rate limiter, keyed by client IP.
  *
- * Known limitation, stated plainly: this is per-instance. On Vercel each
- * serverless instance keeps its own counter, so the effective limit across N
- * warm instances is N x RATE_LIMIT_REQUESTS. That is fine for a demo whose
- * purpose is to stop one tab from hammering the API, and wrong for real abuse
- * prevention. The correct fix is a shared store (Vercel KV / Upstash Redis)
- * with the same interface — `check()` is deliberately shaped so that swap is a
- * one-file change.
+ * Known limitation, stated plainly: this is per-instance. Every isolate — a
+ * Cloudflare Worker instance here, a serverless instance elsewhere — keeps its
+ * own counter, so the effective limit across N warm instances is
+ * N x RATE_LIMIT_REQUESTS. That is fine for a demo whose purpose is to stop one
+ * tab from hammering the API, and wrong for real abuse prevention. The correct
+ * fix is a shared store with the same interface — Cloudflare KV or a Durable
+ * Object, now that Workers is the target — and `check()` is deliberately shaped
+ * so that swap is a one-file change.
  */
 
 const hits = new Map<string, number[]>();
@@ -64,10 +65,12 @@ export function check(key: string): RateLimitResult {
 }
 
 /**
- * Best-effort client identity. Behind Vercel's proxy the real client address is
- * the first entry of x-forwarded-for; `request.ip` is not available in the
- * Node runtime. Falls back to a shared bucket when no header is present, which
- * is the safe direction (over-limiting an unknown caller, not under-limiting).
+ * Best-effort client identity. Behind a platform proxy the real client address
+ * is the first entry of x-forwarded-for; `request.ip` is not available in the
+ * Node runtime. On Cloudflare, `cf-connecting-ip` is the more trustworthy
+ * header and is worth preferring once this actually runs there. Falls back to a
+ * shared bucket when no header is present, which is the safe direction
+ * (over-limiting an unknown caller, not under-limiting).
  */
 export function clientKey(headers: Headers): string {
   const forwarded = headers.get("x-forwarded-for");

@@ -20,7 +20,7 @@ Versions are the ones actually installed and building, not intentions.
 | Model access | `@anthropic-ai/sdk` | 0.117.1 |
 | Model | `claude-sonnet-5`, adaptive thinking, `effort: medium` | — |
 | Eval runner | `tsx` | 4.x |
-| Hosting | **Open decision — see below** | — |
+| Hosting | Cloudflare Workers via `@opennextjs/cloudflare` | adapter 1.20.2, wrangler 4.125.0 |
 
 ## Shape of the system
 
@@ -141,9 +141,27 @@ page does follow the system theme.
 
 ---
 
-## Open decision: where this deploys
+## Where this deploys — decided 2026-08-23
 
-**This is the live blocker and the most important thing on this page.**
+**Cloudflare Workers, via `@opennextjs/cloudflare`.** Option A below was taken;
+the rest of this section is kept because the reasoning is what a reviewer will
+ask about, and because the alternatives are what a re-scope would reverse to.
+
+Built and verified locally before it was committed: `opennextjs-cloudflare
+build` produces `.open-next/worker.js`, and `wrangler dev` serves it on the real
+Workers runtime with both pages, validation, NDJSON streaming and the in-band
+error path all behaving as they do under Node. **Not yet deployed** — that needs
+a Cloudflare login, which is an account action.
+
+| Requirement | State |
+| --- | --- |
+| Claude Code | Met |
+| GitHub | **Met** — pushed 2026-08-23 |
+| AWS or Cloudflare | **Met in configuration**, pending the actual deploy |
+| N8N | **Unmet** — no workflow exists |
+| MCP server, where relevant | **Unmet** — none built or wired |
+
+### The decision as it stood
 
 The capstone brief requires the real toolchain: Claude Code, GitHub, an MCP
 server where relevant, AWS or Cloudflare, and N8N. The product brief supplied at

@@ -7,7 +7,9 @@ conversation in the main column — and the same assistant is available as a
 persisted conversation history, image understanding, tool use, layered
 guardrails, an eval suite, and per-turn observability.
 
-**Live demo:** _(add your Vercel URL here after the first deploy)_
+**Live demo:** _(add the Cloudflare Workers URL here after the first deploy)_
+
+**Repo:** https://github.com/aidarollin/askpbot
 
 ---
 
@@ -31,6 +33,8 @@ Get an API key at [console.anthropic.com](https://console.anthropic.com/settings
 | `npm run eval:offline` | Guardrail + history evals — no API key, no cost |
 | `npm run eval` | Full suite, including real model turns (costs a few cents) |
 | `npm run check` | typecheck + lint + offline evals |
+| `npm run preview` | Build the Cloudflare worker and run it on the real `workerd` runtime |
+| `npm run deploy` | Build and deploy to Cloudflare Workers (needs `wrangler login`) |
 
 ---
 
@@ -278,9 +282,9 @@ turns keep a marker showing an image was sent.
 
 ### Rate limiting is in-memory, and that is a known limitation
 
-Per-instance counters. On Vercel, N warm instances means an effective limit of
+Per-instance counters. With N warm isolates that means an effective limit of
 N × the configured number. Fine for stopping one tab from hammering the API and
-**wrong** for real abuse prevention. `check()` is shaped so swapping in Vercel
+**wrong** for real abuse prevention. `check()` is shaped so swapping in Cloudflare
 KV / Upstash Redis is a one-file change.
 
 ### Plain text rendering, not markdown
@@ -341,7 +345,8 @@ Flags: `--offline`, `--only=safety`, `EVAL_VERBOSE=1`.
 
 ## Observability
 
-Every turn emits one JSON line to stdout — Vercel ingests it with no vendor SDK:
+Every turn emits one JSON line to stdout — Cloudflare's Workers Logs ingests it
+with no vendor SDK:
 
 ```json
 {"ts":"2026-08-17T09:12:44.101Z","event":"chat_turn","requestId":"...","outcome":"ok",
@@ -360,27 +365,35 @@ panel above the disclaimer.
 
 ---
 
-## Deploy to Vercel
+## Deploy to Cloudflare Workers
 
-1. Push this repo to GitHub.
-2. [vercel.com/new](https://vercel.com/new) → import the repo. Framework
-   detection, build command, and output directory are all automatic.
-3. **Settings → Environment Variables** → add `ANTHROPIC_API_KEY` for
-   Production, Preview, and Development. Add any `ASKPBOT_*` overrides here too.
-4. Deploy. Put the resulting URL at the top of this README.
-
-Or from the CLI:
+Via [`@opennextjs/cloudflare`](https://opennext.js.org/cloudflare). The worker
+builds and has been run locally on the real `workerd` runtime; the deploy itself
+has not been performed yet.
 
 ```bash
-npm i -g vercel
-vercel                       # link + preview deploy
-vercel env add ANTHROPIC_API_KEY
-vercel --prod
+npm run preview              # build + run on workerd at http://127.0.0.1:8788
 ```
 
-**Notes.** The chat route runs on the Node runtime with `maxDuration = 60`
-(Vercel's Hobby ceiling). The API key is read server-side only and never reaches
-the browser. `.env.local` is gitignored; `.env.example` is committed.
+`npm run preview` reads local secrets from `.dev.vars` (gitignored) — put
+`ANTHROPIC_API_KEY` there. Then, to ship:
+
+```bash
+npx wrangler login                          # browser OAuth, once
+npx wrangler secret put ANTHROPIC_API_KEY   # paste at the prompt
+npm run deploy                              # build + deploy
+```
+
+The worker is named `askpbot` in `wrangler.jsonc`. Put the resulting URL at the
+top of this README.
+
+**Notes.** Workers limits CPU time rather than wall clock, and a turn spends
+almost all of its time waiting on the Anthropic API rather than computing, so
+long streams are not expected to be a problem — expected, not yet measured
+against a real turn. `maxDuration = 60` on the chat route is a Vercel-only knob
+that Workers ignores; it is kept because it is correct if this ever runs there
+again. The API key is read server-side only and never reaches the browser.
+`.env.local` and `.dev.vars` are gitignored; `.env.example` is committed.
 
 ---
 
@@ -407,7 +420,7 @@ Stated plainly, because pretending they don't exist is worse than having them:
 
 Roughly in order of value:
 
-1. Shared-store rate limiting (Vercel KV) — the one limitation with real
+1. Shared-store rate limiting (Cloudflare KV) — the one limitation with real
    production consequences.
 2. Auth, so the demo URL isn't an open token faucet.
 3. Drop in the real `pbot-awe.svg` and `pbot.riv` assets.

@@ -76,9 +76,12 @@ for the design.
 offline eval suite all pass; the API paths were exercised against a running
 server.
 
+**On GitHub, and configured for Cloudflare Workers.** The worker builds and has
+been run locally on the real `workerd` runtime, streaming included.
+
 **Not yet deployed, and not yet run against a real API key.** Those are the two
-open items, and both gate the retrieval work above — see [STATUS.md](STATUS.md)
-for the dated log and the live blocker list.
+remaining items, and both gate the retrieval work above — see
+[STATUS.md](STATUS.md) for the dated log and the live blocker list.
 
 ## Map of the docs
 

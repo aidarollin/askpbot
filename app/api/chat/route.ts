@@ -8,7 +8,14 @@ import { encodeEvent, type ChatRequestBody, type StreamEvent } from "@/lib/types
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-/** Long enough for a slow multi-tool turn; Vercel's Hobby ceiling. */
+/**
+ * Vercel-only knob, and the deploy target is Cloudflare Workers — Workers
+ * ignores it. Kept because it is the correct value if this ever runs on Vercel
+ * again, and deleting it would silently lose that. Workers limits *CPU* time
+ * rather than wall clock, and a turn spends nearly all of its time waiting on
+ * the Anthropic API rather than computing, so a long stream is not the risk
+ * here. Unverified against a real multi-tool turn — see RELIABILITY.md.
+ */
 export const maxDuration = 60;
 
 /**

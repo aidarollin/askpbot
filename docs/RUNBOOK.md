@@ -17,7 +17,7 @@ the marker comes off only after someone runs it.
 | --- | --- |
 | **Live URL** | _not deployed yet_ |
 | **Repo** | https://github.com/aidarollin/askpbot (`main`) |
-| **Platform** | **Undecided** — Vercel built for, AWS/Cloudflare required |
+| **Platform** | Cloudflare Workers via `@opennextjs/cloudflare` |
 | **Secret** | `ANTHROPIC_API_KEY`, server-side only, set in the platform's env settings |
 | **Logs** | Structured JSON on stdout; `chat_turn` and `chat_feedback` events |
 | **Local** | `.env.local` (gitignored). Template: `.env.example` |
@@ -88,15 +88,41 @@ Watch `outcome` (`ok` / `blocked` / `rate_limited` / `refusal` / `error`),
 
 ## Deploy
 
-⛔ **All of this section is unrun.** Fill in the real commands and remove this
-marker after the first deploy. Do not copy vendor documentation in here
-unverified — that is exactly the "invented commands" failure.
+**Build the worker.** ✅ Run on this project 2026-08-23.
 
-1. Push to GitHub, import the repo in the platform's dashboard.
-2. Set `ANTHROPIC_API_KEY` in environment settings for every environment.
-3. Deploy, then run the *Verify a running server* block above against the live
-   URL.
-4. Put the URL at the top of `README.md` and in *At a glance* above.
+```bash
+npx opennextjs-cloudflare build     # -> .open-next/worker.js
+```
+
+**Run it locally on the real Workers runtime.** ✅ Run 2026-08-23. This is not
+`next start` — it is `workerd`, the same runtime Cloudflare runs in production,
+so it catches what a Node dev server cannot.
+
+```bash
+# .dev.vars holds local secrets (gitignored). It needs ANTHROPIC_API_KEY.
+npx opennextjs-cloudflare preview -- --port 8788
+```
+
+Then run the *Verify a running server* block against `http://127.0.0.1:8788`.
+
+**Ship it.** ⛔ Not yet run — needs a Cloudflare login, which is an account
+action nobody has performed from this repo.
+
+```bash
+npx wrangler login                                   # opens a browser
+npx wrangler secret put ANTHROPIC_API_KEY            # paste at the prompt
+npm run deploy                                       # build + deploy
+```
+
+`npm run deploy` is `opennextjs-cloudflare build && opennextjs-cloudflare
+deploy`. The worker name is `askpbot`, set in `wrangler.jsonc`.
+
+**After the first deploy.** ⛔
+
+1. Run the *Verify a running server* block against the live URL.
+2. Put the URL at the top of `README.md` and in *At a glance* above.
+3. Remove the ⛔ markers from the two blocks above — but only the ones you
+   actually ran.
 
 ---
 
@@ -108,7 +134,8 @@ unverified — that is exactly the "invented commands" failure.
 or a screenshot.
 
 1. Create a new key in the Anthropic Console.
-2. Update the platform env var; redeploy so it takes effect.
+2. `npx wrangler secret put ANTHROPIC_API_KEY` and paste the new one. Workers
+   secrets take effect without a redeploy.
 3. Revoke the old key **after** confirming the new one works.
 4. Rotating does not scrub history — if the key reached a commit, it is still
    in the git history. Rotate first, clean history second.
@@ -121,10 +148,17 @@ afterwards, when nobody is waiting.
 
 ### Kill the traffic
 
-⛔ If the URL is being abused and burning tokens: remove `ANTHROPIC_API_KEY`
-from the environment and redeploy. Every turn then fails fast with
-`500 missing_api_key` and the page still loads. Spend stops immediately. This
-is the emergency brake — there is no auth to disable instead.
+⛔ If the URL is being abused and burning tokens:
+
+```bash
+npx wrangler secret delete ANTHROPIC_API_KEY
+```
+
+Every turn then fails fast with `500 missing_api_key` and both pages still load.
+Spend stops immediately. **Verified locally 2026-08-23**: with no key the
+missing-key guard short-circuits before validation and before the pre-screen, so
+nothing downstream can run. This is the emergency brake — there is no auth to
+disable instead.
 
 ---
 
