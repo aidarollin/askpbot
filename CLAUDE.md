@@ -59,6 +59,24 @@ would hide exactly that difference until it shipped.
 old one, and the question goes up with the wrong history. `startChatWith` builds
 the turn itself for this reason.
 
+**`npm run build` must stay `opennextjs-cloudflare build`, not `next build`.**
+Cloudflare deploys the Worker in `.open-next/`, and `next build` only produces
+`.next/`. Point the build script at plain `next build` and the hosted deploy
+fails with `Could not find compiled Open Next config, did you run the build
+command?` — a message that blames the build step while the build step reported
+success. `opennextjs-cloudflare build` runs `next build` internally, so one
+command covers both; `npm run build:next` is there when you only want the Next
+half.
+
+**`buildCommand` in `open-next.config.ts` is load-bearing, and the two settings
+are a pair.** `opennextjs-cloudflare build` produces the Next output by shelling
+out to the package manager's `build` script — which is itself. Without
+`buildCommand: "npm run build:next"` overriding that, `npm run build` recurses
+into itself until Node dies with a stack overflow. Change one of these two and
+you must change the other: script name, or the `buildCommand` that points past
+it. `defineCloudflareConfig()` does not take the option, which is why the config
+spreads its result and sets `buildCommand` alongside.
+
 **Keep `initOpenNextCloudflareForDev()` guarded in `next.config.ts`.** The
 Cloudflare adapter's scaffold emits it unguarded, and Next loads that file for
 `next build` as well as `next dev` — so every build spawns a `workerd` that

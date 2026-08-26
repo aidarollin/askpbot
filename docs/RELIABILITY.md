@@ -34,7 +34,8 @@ verified **deployed**. Those are the two gaps, and they are the top items in
 ```bash
 npm run typecheck     # tsc --noEmit
 npm run lint          # eslint
-npm run build         # next build
+npm run build         # opennextjs-cloudflare build — the deployable Worker
+npm run build:next    # just next build, if that is all you need
 ```
 
 `npm run check` runs typecheck, lint, and the offline evals together. It is the

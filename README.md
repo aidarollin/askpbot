@@ -27,7 +27,8 @@ Get an API key at [console.anthropic.com](https://console.anthropic.com/settings
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Local dev server |
-| `npm run build` | Production build |
+| `npm run build` | Production build — **builds the Cloudflare Worker** (`.open-next/worker.js`), running `next build` on the way. This is what the deploy needs |
+| `npm run build:next` | Just `next build`, when you only want to check the Next app compiles |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint |
 | `npm run eval:offline` | Guardrail + history evals — no API key, no cost |

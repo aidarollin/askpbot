@@ -38,6 +38,100 @@ Entry shape: **Done / Decided / Blocked / Next**.
 
 ---
 
+## 2026-08-26 (later) — The build fix was itself broken; found by running it
+
+**Done**
+
+- Ran the verification the entry below could not: `npm run check` passes
+  (typecheck, lint, 7/7 offline evals).
+- Ran `npm run build` — **it failed**, recursing until Node ran out of stack.
+  `opennextjs-cloudflare build` shells out to the package manager's `build`
+  script to produce the Next output, and the entry below had just made
+  `npm run build` *be* `opennextjs-cloudflare build`. It called itself.
+- Fixed by setting `buildCommand: "npm run build:next"` in
+  `open-next.config.ts`, so the adapter runs the Next half instead of re-entering
+  itself. `defineCloudflareConfig()` does not accept the option, so its result is
+  spread and `buildCommand` added alongside; the option is a real one
+  (`OpenNextConfig.buildCommand`), not a workaround.
+- `npm run build` now completes and writes `.open-next/worker.js` — the artifact
+  the Cloudflare deploy step was looking for.
+
+**Found**
+
+- **A fix that is only read and never run is a guess.** The package.json change
+  below was reasoned from the error message and was half right: the diagnosis
+  held, the remedy did not. A single `npm run build` exposed it.
+
+**Blocked**
+
+- Blocker 1 unchanged: still no API key. Pages load; every chat turn fails.
+
+**Next**
+
+1. Add the model API key as a Worker **secret**, then verify a live turn.
+2. Decide provider: Anthropic key now, or the OpenRouter rewrite.
+3. Confirm the *hosted* Cloudflare build goes green on this push — local success
+   is not hosted success, and the hosted builder runs Linux.
+
+---
+
+## 2026-08-26 — First hosted deploy attempt failed; build command was wrong
+
+**Done**
+
+- Connected the GitHub repo to Cloudflare Workers Builds. The build ran; the
+  **deploy step failed**.
+- Diagnosed from the build log. The project's build command was `npm run build`,
+  which was `next build` — that produces `.next/`, never `.open-next/`. The
+  deploy step then failed with `Could not find compiled Open Next config, did
+  you run the build command?`
+- Fixed in the repo rather than in dashboard settings: `npm run build` is now
+  `opennextjs-cloudflare build`, with `npm run build:next` kept for the Next-only
+  case. Recorded in `CLAUDE.md`.
+
+**Decided**
+
+- **Fix it in `package.json`, not in the Cloudflare dashboard.** Either would
+  work, but a dashboard field is invisible from the repo, undocumented, and lost
+  if the project is ever recreated. Making `npm run build` produce the artifact
+  that actually ships means the default any host reaches for is correct.
+  `opennextjs-cloudflare build` runs `next build` internally, so nothing is lost.
+  **This half-fix does not work on its own — see the next entry.** Swapping the
+  script alone makes the build recurse into itself.
+
+**Found**
+
+- **The failure message blames the wrong step.** The build reported
+  `Success: Build command completed`, and the error surfaced during *deploy*
+  while actually being a build-configuration fault. Worth knowing before anyone
+  spends an hour on `wrangler`.
+- The hosted builder uses Node 24.18 and installed cleanly, so neither the Node
+  version nor the lockfile were involved.
+
+**Blocked**
+
+- **Verification is not possible from this session.** A safety classifier is
+  refusing every command and network call, so none of this fix has been built,
+  tested, or committed by me — it is source edits only. It needs `npm run check`
+  and a push before Cloudflare will retry.
+- Blocker 1 unchanged: still no API key, so even a successful deploy will load
+  the pages and fail every chat turn.
+
+**Open question**
+
+- Provider direction is unresolved. The stated preference is to move to
+  OpenRouter, which is a rewrite of `lib/agent.ts` and the loss of six
+  Anthropic-specific behaviours — scoped in conversation, not yet written up or
+  agreed here. The build fix above is provider-agnostic and needed either way.
+
+**Next**
+
+1. `npm run check`, then commit and push. Cloudflare rebuilds on push.
+2. Add the model API key as a Worker **secret**.
+3. Decide provider: Anthropic key now, or the OpenRouter rewrite.
+
+---
+
 ## 2026-08-23 (night, later) — Cloudflare Workers, built and verified on workerd
 
 **Done**

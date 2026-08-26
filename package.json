@@ -2,8 +2,12 @@
   "name": "askpbot",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
-    "build": "next build",
+    "build": "opennextjs-cloudflare build",
+    "build:next": "next build",
     "dev": "next dev",
     "start": "next start",
     "lint": "eslint",
