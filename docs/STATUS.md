@@ -62,9 +62,30 @@ Entry shape: **Done / Decided / Blocked / Next**.
   below was reasoned from the error message and was half right: the diagnosis
   held, the remedy did not. A single `npm run build` exposed it.
 
+**Also done — ran the app**
+
+- `npm run dev`, then probed it. `/` and `/embed` both 200.
+- `POST /api/chat` returned `500 missing_api_key` **despite** a `.dev.vars`
+  holding `ANTHROPIC_API_KEY`, and despite the dev server logging
+  `Using secrets defined in .dev.vars`. Traced it: that call exposes values on
+  `getCloudflareContext().env`, while the route reads `process.env`. Moving the
+  key to `.env.local` fixed it immediately. Recorded in `CLAUDE.md` and
+  `RELIABILITY.md` — the log line makes this fail quietly, in the direction of
+  looking like it worked.
+- The key in `.dev.vars` is `sk-ant-not-a-real-key-for-path-testing`, so with it
+  loaded the turn reached Anthropic and was rejected. That is the first live
+  confirmation of the **two-error-paths** rule: the stream had already sent
+  `{"type":"status","value":"thinking"}`, so the auth failure arrived in-band as
+  `{"type":"error","code":"auth"}` rather than an HTTP status.
+- Checked what this means for deploy: the adapter's `populateProcessEnv` copies
+  Cloudflare vars and secrets onto `process.env` per request, so a Worker
+  **secret** will reach the route with no `.env.local` needed. Read from the
+  adapter source, not verified by deploying.
+
 **Blocked**
 
-- Blocker 1 unchanged: still no API key. Pages load; every chat turn fails.
+- Blocker 1 unchanged: still no real API key, so no model behaviour is verified.
+  Everything up to the model call now is.
 
 **Next**
 

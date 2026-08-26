@@ -2,7 +2,7 @@
 
 _What is checked, what actually passed, and where this system can fail._
 
-Last reviewed: 2026-08-23
+Last reviewed: 2026-08-26
 
 ---
 
@@ -15,12 +15,14 @@ verified **deployed**. Those are the two gaps, and they are the top items in
 
 | Layer | Coverage | Last run | Result |
 | --- | --- | --- | --- |
-| Type safety | Whole repo, `strict` | 2026-08-23 | Pass, 0 errors |
-| Lint | Whole repo | 2026-08-23 | Pass, 0 warnings |
-| Production build | Whole app | 2026-08-23 | Pass, 5 routes |
-| Offline evals | Guardrails, attachments, history | 2026-08-23 | **7/7 pass** |
+| Type safety | Whole repo, `strict` | 2026-08-26 | Pass, 0 errors |
+| Lint | Whole repo | 2026-08-26 | Pass, 0 warnings |
+| Production build | Whole app | 2026-08-26 | Pass, 5 routes |
+| Offline evals | Guardrails, attachments, history | 2026-08-26 | **7/7 pass** |
 | Rendered-markup checks | `/` and `/embed`, production server | 2026-08-23 | Pass, both 200 |
+| Dev-server route check | `/` and `/embed` on `next dev` | 2026-08-26 | Pass, both 200 |
 | API path smoke tests | Chat + feedback routes, running server | 2026-08-23 | Pass, 10 paths |
+| Post-stream error path | Auth failure after first byte | 2026-08-26 | Pass, in-band error event |
 | UI interaction, either surface | Clicking through it | **Never run** | **Unknown** |
 | Model evals | Persona, safety, tools, memory | **Never run** | **Unknown** |
 | Cloudflare worker build | `opennextjs-cloudflare build` | 2026-08-23 | Pass |
@@ -153,6 +155,37 @@ written into the runbook rather than left implicit.
 
 The reproducible version of these lives in [RUNBOOK.md](RUNBOOK.md) under
 *Verify a deployment*.
+
+### Dev-server re-run, 2026-08-26
+
+`npm run dev`, then the same shape of probes. Both surfaces served and the
+post-stream error path behaved as it did on the production server, so the
+behaviour is not an artefact of the production build.
+
+| Path | Observed |
+| --- | --- |
+| `GET /` | 200 |
+| `GET /embed` | 200 |
+| `POST /api/chat`, no key visible to the server | `500 missing_api_key` |
+| `POST /api/chat`, placeholder key | 200, `{"type":"status","value":"thinking"}` then `{"type":"error","code":"auth"}` |
+
+The last row is the two-error-paths rule from `CLAUDE.md` observed end to end:
+the status event is the first byte, so the HTTP status is already locked at 200
+and the auth failure arrives in-band as a stream event instead of a 401.
+
+**`.dev.vars` does not configure `next dev`.** A `.dev.vars` holding
+`ANTHROPIC_API_KEY` is *not* enough locally, and the failure is quiet: the dev
+server logs `Using secrets defined in .dev.vars`, which reads like the key
+loaded, while every chat request still returns `500 missing_api_key`.
+`initOpenNextCloudflareForDev()` exposes those values on
+`getCloudflareContext().env`, and the chat route reads `process.env`. Put the
+key in `.env.local` for local work — that is what `.env.example` already says.
+
+The deployed Worker is the opposite case and needs no `.env.local`: the
+adapter's `populateProcessEnv` copies every Cloudflare var and secret onto
+`process.env` at request time, so a Worker **secret** does reach the route.
+Verified by reading the adapter, not by deploying — the deployed probe row above
+is still **Never run**.
 
 ## Layer 5 — The Workers runtime
 

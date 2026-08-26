@@ -34,6 +34,16 @@ narrow on purpose — each requires an instruction-request phrasing *and* a
 specific harmful object. `guard-prescreen-false-positives` in the eval suite will
 fail if they start catching legitimate questions, which is the point of that case.
 
+**`.dev.vars` does not give `next dev` an API key — `.env.local` does.** The dev
+server prints `Using secrets defined in .dev.vars`, which looks like the key
+loaded, and then every chat request returns `500 missing_api_key`.
+`initOpenNextCloudflareForDev()` puts those values on
+`getCloudflareContext().env`; the chat route reads `process.env`. Deployment is
+the opposite and needs no `.env.local`: the adapter's `populateProcessEnv`
+copies Cloudflare vars and secrets onto `process.env` per request, so a Worker
+**secret** does reach the route. Local and deployed load secrets by different
+mechanisms — don't reason from one to the other.
+
 **`lib/config.ts` is server-only.** Anything the browser also needs goes in
 `lib/limits.ts` with a `NEXT_PUBLIC_` env var, or its env override silently
 resolves to `undefined` client-side.
