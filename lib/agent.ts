@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { EFFORT, MAX_TOKENS, MAX_TOOL_ITERATIONS, MODEL } from "./config";
+import { BASE_URL, EFFORT, MAX_TOKENS, MAX_TOOL_ITERATIONS, MODEL } from "./config";
 import { SYSTEM_PROMPT } from "./prompt";
 import { runTool, TOOLS } from "./tools";
 import type { Attachment, Role, StreamEvent, TurnUsage } from "./types";
@@ -70,6 +70,24 @@ function toContent(
   return blocks;
 }
 
+/**
+ * True only for "an upstream content filter blocked this turn".
+ *
+ * Anthropic direct signals a declined turn in-band: HTTP 200 with
+ * `stop_reason: "refusal"`. Through a gateway the same turn can instead fail
+ * the whole request, because the filter runs in front of the model and there is
+ * no message to return. Without this, a declined question surfaces to the user
+ * as a generic server error.
+ *
+ * Deliberately narrow. Auth failures, rate limits, bad requests, and provider
+ * outages must keep surfacing as errors — turning every 400 into a polite
+ * decline would hide real breakage behind an in-character message.
+ */
+function isContentFilterBlock(error: unknown): boolean {
+  if (!(error instanceof Anthropic.APIError)) return false;
+  return JSON.stringify(error.error ?? {}).includes("content_policy_violation");
+}
+
 export async function runTurn(
   history: { role: Role; content: string; image?: Attachment }[],
   options: RunTurnOptions = {},
@@ -78,7 +96,9 @@ export async function runTurn(
   const startedAt = options.startedAt ?? Date.now();
   const emit = (event: StreamEvent) => onEvent?.(event);
 
-  const client = new Anthropic();
+  // `baseURL: undefined` is the SDK's own default, so this is a no-op when the
+  // env var is unset and a provider switch when it is set.
+  const client = new Anthropic({ baseURL: BASE_URL });
   const messages: Anthropic.MessageParam[] = history.map((m) => ({
     role: m.role,
     content: toContent(m),
@@ -123,26 +143,42 @@ export async function runTurn(
       { signal },
     );
 
-    for await (const event of turn) {
-      if (event.type === "content_block_start") {
-        const block = event.content_block;
-        if (block.type === "thinking") {
-          emit({ type: "status", value: "thinking" });
-        } else if (block.type === "tool_use") {
-          toolCalls.push(block.name);
-          emit({ type: "status", value: "tool" });
-          emit({ type: "tool_use", name: block.name });
-        } else if (block.type === "text") {
-          emit({ type: "status", value: "generating" });
+    let message: Anthropic.Message;
+    try {
+      for await (const event of turn) {
+        if (event.type === "content_block_start") {
+          const block = event.content_block;
+          if (block.type === "thinking") {
+            emit({ type: "status", value: "thinking" });
+          } else if (block.type === "tool_use") {
+            toolCalls.push(block.name);
+            emit({ type: "status", value: "tool" });
+            emit({ type: "tool_use", name: block.name });
+          } else if (block.type === "text") {
+            emit({ type: "status", value: "generating" });
+          }
+        } else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+          ttftMs ??= Date.now() - startedAt;
+          text += event.delta.text;
+          emit({ type: "text", value: event.delta.text });
         }
-      } else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-        ttftMs ??= Date.now() - startedAt;
-        text += event.delta.text;
-        emit({ type: "text", value: event.delta.text });
       }
+
+      message = await turn.finalMessage();
+    } catch (error) {
+      if (!isContentFilterBlock(error)) throw error;
+      // Same situation as `stop_reason: "refusal"` below, reported as a failed
+      // request instead of a completed one. Reported as a refusal so the user
+      // gets the panda's decline rather than "something went wrong", and so
+      // logs and evals see one refusal concept rather than two.
+      stopReason = "refusal";
+      if (text.length === 0) {
+        text = REFUSAL_FALLBACK;
+        emit({ type: "text", value: REFUSAL_FALLBACK });
+      }
+      break;
     }
 
-    const message = await turn.finalMessage();
     usage.inputTokens += message.usage.input_tokens;
     usage.outputTokens += message.usage.output_tokens;
     usage.cacheReadTokens += message.usage.cache_read_input_tokens ?? 0;

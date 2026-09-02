@@ -30,11 +30,83 @@ Entry shape: **Done / Decided / Blocked / Next**.
 
 | # | Blocker | Raised | Owner | Needed by |
 | --- | --- | --- | --- | --- |
-| 1 | **No Anthropic API key.** Nothing has ever run against the real model — the 12 model evals have not been executed once. | 2026-08-17 | Me | Before any deploy |
+| ~~1~~ | ~~**No Anthropic API key.**~~ **Resolved 2026-09-02** — an OpenRouter key arrived and the full suite ran for the first time: **18/19**. Caveat: verified through OpenRouter, never against Anthropic direct. | 2026-08-17 | Me | Done |
 | 2 | **Platform** — resolved in configuration 2026-08-23: Cloudflare Workers via `@opennextjs/cloudflare`, built and verified locally on `workerd`. **Still needs mentor sign-off, and the deploy itself has not been run.** | 2026-08-23 | Me + mentor | Mid-capstone review |
 | 3 | **N8N and MCP requirements unmet.** No workflow, no MCP server. | 2026-08-23 | Me | Mid-capstone review |
 | 4 | **Deadline dates unknown.** SCOPE.md cannot name a ship date. | 2026-08-23 | Mentor | Immediately |
 | ~~5~~ | ~~**Not on GitHub.**~~ **Resolved 2026-08-23** — pushed to https://github.com/aidarollin/askpbot, `main` tracking `origin/main`. | 2026-08-23 | Me | Done |
+
+---
+
+## 2026-09-02 — A real key, the first model evals ever, and OpenRouter
+
+**Done**
+
+- A real key arrived. It is an **OpenRouter** key, not an Anthropic one, so it
+  was rejected by `api.anthropic.com` — verified against a clean dev server
+  before concluding anything.
+- Asked which way to go and was told: migrate to OpenRouter.
+- **Tested the endpoint before writing any code, and the premise of the previous
+  open question turned out to be false.** OpenRouter serves an
+  Anthropic-compatible `/v1/messages` that accepts the entire parameter set this
+  app sends — `thinking: {type:"adaptive"}`, `output_config.effort`,
+  `cache_control`, `tools` — and returns `thinking` blocks, `tool_use`,
+  `stop_reason`, and cache-token `usage`. It accepts `x-api-key` too, so
+  `@anthropic-ai/sdk` works unmodified.
+- So the migration is **two env vars, not a rewrite**:
+  `ANTHROPIC_BASE_URL=https://openrouter.ai/api` and
+  `ASKPBOT_MODEL=anthropic/claude-sonnet-5`. Unset means Anthropic direct, as
+  before. `BASE_URL` was added to `lib/config.ts` and passed explicitly to both
+  clients — the SDK reads the env var by itself, but a variable that sends every
+  prompt and every key to a third party should not be discoverable only by
+  reading the SDK's constructor.
+- `ASKPBOT_JUDGE_MODEL` now defaults to `MODEL` instead of a hardcoded
+  `claude-sonnet-5`, so a provider switch carries the judge with it. Pinned, it
+  would have failed every subjective case while mechanical ones passed.
+- **Ran the 12 model evals for the first time in this project's life: 18/19**
+  including the offline seven. Live streamed turns confirmed over HTTP, tool
+  round-trip included, with prompt caching hitting across turns.
+
+**Found**
+
+- **The earlier "rewrite `lib/agent.ts`, lose six Anthropic-specific
+  behaviours" estimate was wrong.** It was reasoned from the SDK's name and
+  never tested against the endpoint. Nothing was lost structurally. The lesson
+  is the same as the build-command one below: an estimate nobody executed is a
+  guess wearing a number.
+- **The base URL must stop at `/api`, not `/api/v1`.** The SDK appends
+  `/v1/messages` itself, so OpenRouter's own documented `/api/v1` resolves to
+  `/api/v1/v1/messages` and 404s — surfacing as a generic `api_404`
+  "something went wrong" that points nowhere near the URL. Cost a real
+  debugging cycle; now in `CLAUDE.md`, `lib/config.ts` and `.env.example`.
+- **One genuine regression: safety declines.** `safety-weapons` fails. The
+  gateway's filter blocks before generation, so unlike Anthropic direct there is
+  no model-authored decline, and the fixed `REFUSAL_FALLBACK` cannot offer an
+  alternative adjacent to what was asked. It used to *throw* — that is fixed, so
+  the user now gets the panda's decline instead of an error — but the
+  topic-awareness is gone. **Left failing on purpose.** Rewording the fallback
+  to satisfy the judge would hide the regression rather than fix it.
+
+**Decided**
+
+- Keep `ANTHROPIC_API_KEY` as the variable name even under OpenRouter. It is
+  whatever key the configured endpoint accepts; renaming it would touch the
+  route, the evals, the runbook and the Cloudflare secret for no behavioural
+  gain.
+
+**Blocked**
+
+- **Deployment is now the only top gap.** Nothing has run on the live URL.
+- `.dev.vars` still holds a fake key. Harmless — it is not read by `next dev`
+  (see the entry below) — but it should be deleted or filled before anyone
+  trusts it.
+
+**Next**
+
+1. Deploy, and add `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` + `ASKPBOT_MODEL`
+   as Worker settings — the key as a **secret**, the other two as plain vars.
+2. Confirm the hosted Cloudflare build goes green.
+3. Click through the UI. Still nobody's done it — the oldest unverified row.
 
 ---
 

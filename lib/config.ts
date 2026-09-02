@@ -3,7 +3,34 @@
  * deployed app can be retuned without a code change.
  */
 
-/** Model used for chat. Sonnet 5 balances quality and latency for conversation. */
+/**
+ * API base URL. Unset means Anthropic direct, which is the default.
+ *
+ * The SDK reads `ANTHROPIC_BASE_URL` by itself, so this constant changes no
+ * behaviour. It exists to make the redirect visible: a variable that sends
+ * every prompt and every API key to a third party should not be discoverable
+ * only by reading the SDK's constructor.
+ *
+ * OpenRouter serves an Anthropic-compatible `/v1/messages`, so pointing at
+ * `https://openrouter.ai/api` is the entire provider switch — the SDK, the
+ * tool loop, adaptive thinking, `effort`, `cache_control`, and the cache-token
+ * fields of `usage` all work there unmodified. What does *not* carry over is
+ * the model id: OpenRouter needs a provider prefix, so `MODEL` must be set to
+ * `anthropic/claude-sonnet-5` rather than `claude-sonnet-5`. Set one without
+ * the other and every turn fails with a not-found error.
+ *
+ * Note the URL stops at `/api`, with no `/v1`. The SDK appends `/v1/messages`
+ * itself, so the usual `https://openrouter.ai/api/v1` from OpenRouter's docs
+ * resolves to `/api/v1/v1/messages` and 404s — which surfaces to the user as
+ * the generic `api_404` "something went wrong", giving no hint that the URL is
+ * the problem.
+ */
+export const BASE_URL = process.env.ANTHROPIC_BASE_URL;
+
+/**
+ * Model used for chat. Sonnet 5 balances quality and latency for conversation.
+ * Needs a provider prefix when `BASE_URL` points at OpenRouter — see above.
+ */
 export const MODEL = process.env.ASKPBOT_MODEL ?? "claude-sonnet-5";
 
 /**

@@ -213,6 +213,15 @@ features.
 **Worth it** for a project where token accounting and refusal handling are
 explicit requirements.
 
+**This did not lock the app to one vendor.** Since 2026-09-02 traffic runs
+through OpenRouter, which serves an Anthropic-compatible `/v1/messages` — the
+SDK, the tool loop, adaptive thinking, `effort`, `cache_control` and the
+cache-token fields of `usage` all work there unchanged. It is two env vars
+(`ANTHROPIC_BASE_URL` + a provider-prefixed `ASKPBOT_MODEL`), and unset still
+means Anthropic direct. The one measured difference is safety declines: the
+gateway's filter blocks before generation, so a declined turn has no
+model-authored text and falls back to fixed copy. See `docs/RELIABILITY.md`.
+
 ### Adaptive thinking + `effort: medium`
 
 Rather than a fixed thinking budget, the model decides per message whether a

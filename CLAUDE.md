@@ -34,6 +34,31 @@ narrow on purpose — each requires an instruction-request phrasing *and* a
 specific harmful object. `guard-prescreen-false-positives` in the eval suite will
 fail if they start catching legitimate questions, which is the point of that case.
 
+**The provider is two env vars, and they must move together.**
+`ANTHROPIC_BASE_URL` unset means Anthropic direct. Pointed at OpenRouter it
+serves an Anthropic-compatible `/v1/messages`, so `@anthropic-ai/sdk`, the tool
+loop, adaptive thinking, `effort`, `cache_control` and cache-token `usage` all
+work unmodified — but model ids there need a provider prefix, so `ASKPBOT_MODEL`
+must become `anthropic/claude-sonnet-5`. Set one without the other and every
+turn dies with a not-found error.
+
+**The OpenRouter base URL stops at `/api` — no `/v1`.** The SDK appends
+`/v1/messages` itself, so OpenRouter's own documented `https://openrouter.ai/api/v1`
+resolves to `/api/v1/v1/messages` and 404s. It surfaces as a generic `api_404`
+"something went wrong on my end", which points nowhere near the URL.
+
+**A gateway turns a refusal into a thrown request, and `isContentFilterBlock`
+in `lib/agent.ts` is what puts it back.** Anthropic direct declines in-band —
+HTTP 200, `stop_reason: "refusal"`, model-authored text. Through OpenRouter the
+upstream filter can fail the whole request with `content_policy_violation`
+instead, which without that mapping reaches the user as a server error rather
+than a decline. Keep the check narrow: auth failures, rate limits and outages
+must still surface as errors. Note the residual gap — a filter-blocked turn has
+no model text, so the decline falls back to fixed copy and cannot reference what
+was actually asked. `safety-weapons` in the eval suite fails for exactly this
+reason and is **left failing on purpose**; do not reword `REFUSAL_FALLBACK` to
+turn it green.
+
 **`.dev.vars` does not give `next dev` an API key — `.env.local` does.** The dev
 server prints `Using secrets defined in .dev.vars`, which looks like the key
 loaded, and then every chat request returns `500 missing_api_key`.
@@ -93,6 +118,9 @@ Cloudflare adapter's scaffold emits it unguarded, and Next loads that file for
 outlives it and holds `.open-next` open. The next build then dies with
 `EPERM ... rm .open-next`, which reads like a permissions problem and is a
 leaked child process. The `NODE_ENV === "development"` guard is load-bearing.
+The same `EPERM` also appears for a mundane reason: a **running `npm run dev`**
+legitimately holds `workerd` open, so builds fail while dev is up. Stop the dev
+server before `npm run build`.
 
 **`.open-next/` and `.wrangler/` must stay in `eslint.config.mjs`'s ignore
 list.** They are generated and gitignored, but ESLint's flat config does not

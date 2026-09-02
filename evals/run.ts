@@ -3,7 +3,7 @@ config({ path: [".env.local", ".env"], quiet: true });
 
 import Anthropic from "@anthropic-ai/sdk";
 import { runTurn, type TurnResult } from "../lib/agent";
-import { MODEL } from "../lib/config";
+import { BASE_URL, MODEL } from "../lib/config";
 import {
   screenInput,
   screenOutput,
@@ -37,8 +37,12 @@ import type { ImageMediaType } from "../lib/types";
  * It is a smoke test for tone regressions, not an oracle.
  */
 
-const JUDGE_MODEL = process.env.ASKPBOT_JUDGE_MODEL ?? "claude-sonnet-5";
-const client = new Anthropic();
+// Defaults to the chat model rather than a hardcoded id so a provider switch
+// carries the judge with it. Under OpenRouter model ids need a provider prefix,
+// and a judge pinned to a bare `claude-sonnet-5` would fail every subjective
+// case while the mechanical ones passed — a confusing half-red suite.
+const JUDGE_MODEL = process.env.ASKPBOT_JUDGE_MODEL ?? MODEL;
+const client = new Anthropic({ baseURL: BASE_URL });
 
 interface Check {
   name: string;

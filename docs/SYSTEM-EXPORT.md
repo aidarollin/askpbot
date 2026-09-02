@@ -311,15 +311,19 @@ Every file, verbatim, as generated from the working tree.
 ### 6.1 Project files
 
 #### `package.json`  
-_40 lines_
+_44 lines_
 
 ```json
 {
   "name": "askpbot",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
-    "build": "next build",
+    "build": "opennextjs-cloudflare build",
+    "build:next": "next build",
     "dev": "next dev",
     "start": "next start",
     "lint": "eslint",
@@ -419,33 +423,65 @@ _27 lines_
 ```
 
 #### `open-next.config.ts`  
-_9 lines_
+_18 lines_
 
 ```ts
 // default open-next.config.ts file created by @opennextjs/cloudflare
 import { defineCloudflareConfig } from "@opennextjs/cloudflare";
 // import r2IncrementalCache from "@opennextjs/cloudflare/overrides/incremental-cache/r2-incremental-cache";
 
-export default defineCloudflareConfig({
-	// For best results consider enabling R2 caching
-	// See https://opennext.js.org/cloudflare/caching for more details
-	// incrementalCache: r2IncrementalCache
-});
+const config = {
+	...defineCloudflareConfig({
+		// For best results consider enabling R2 caching
+		// See https://opennext.js.org/cloudflare/caching for more details
+		// incrementalCache: r2IncrementalCache
+	}),
+
+	// `opennextjs-cloudflare build` shells out to the package manager's `build`
+	// script to produce the Next output. Since `npm run build` IS this command,
+	// leaving the default recurses until Node dies. Point it at the Next half.
+	buildCommand: "npm run build:next",
+};
+
+export default config;
 ```
 
 #### `.env.example`  
-_37 lines_
+_61 lines_
 
 ```bash
 # Copy to .env.local for local development. Never commit .env.local.
 # On your host, set these under the project's Environment Variables settings.
 
 # Required. Create at https://console.anthropic.com/settings/keys
+# If you point ANTHROPIC_BASE_URL at OpenRouter (below), put the OpenRouter key
+# here instead — the variable name stays the same, it is just whatever key the
+# configured endpoint accepts.
 ANTHROPIC_API_KEY=
+
+# --- Provider ---------------------------------------------------------------
+
+# Unset means Anthropic direct, which is the default and needs nothing here.
+#
+# OpenRouter serves an Anthropic-compatible /v1/messages, so the SDK, tool loop,
+# adaptive thinking, effort, cache_control, and cache-token usage all work there
+# unchanged. To use it, set BOTH of these — the base URL alone is not enough,
+# because OpenRouter model ids carry a provider prefix and an unprefixed id
+# fails with a not-found error on every turn:
+#
+#   ANTHROPIC_BASE_URL=https://openrouter.ai/api
+#   ASKPBOT_MODEL=anthropic/claude-sonnet-5
+#
+# The URL stops at /api on purpose. The SDK appends /v1/messages itself, so
+# OpenRouter's documented https://openrouter.ai/api/v1 becomes /api/v1/v1/...
+# and 404s.
+#
+# ANTHROPIC_BASE_URL=
 
 # --- Optional tuning (defaults shown) ---------------------------------------
 
 # Chat model. claude-haiku-4-5 is cheaper and faster; claude-opus-5 is stronger.
+# Needs a provider prefix under OpenRouter (anthropic/claude-sonnet-5).
 # ASKPBOT_MODEL=claude-sonnet-5
 
 # Thinking depth: low | medium | high | xhigh | max.
@@ -472,8 +508,9 @@ ANTHROPIC_API_KEY=
 # Largest attachment in decoded bytes.
 # NEXT_PUBLIC_ASKPBOT_MAX_IMAGE_BYTES=4000000
 
-# Model used to grade subjective eval criteria.
-# ASKPBOT_JUDGE_MODEL=claude-sonnet-5
+# Model used to grade subjective eval criteria. Defaults to ASKPBOT_MODEL, so a
+# provider switch carries the judge with it automatically.
+# ASKPBOT_JUDGE_MODEL=
 ```
 
 
@@ -561,7 +598,7 @@ export function encodeEvent(event: StreamEvent): Uint8Array {
 ```
 
 #### `lib/config.ts`  
-_43 lines_
+_70 lines_
 
 ```ts
 /**
@@ -569,7 +606,34 @@ _43 lines_
  * deployed app can be retuned without a code change.
  */
 
-/** Model used for chat. Sonnet 5 balances quality and latency for conversation. */
+/**
+ * API base URL. Unset means Anthropic direct, which is the default.
+ *
+ * The SDK reads `ANTHROPIC_BASE_URL` by itself, so this constant changes no
+ * behaviour. It exists to make the redirect visible: a variable that sends
+ * every prompt and every API key to a third party should not be discoverable
+ * only by reading the SDK's constructor.
+ *
+ * OpenRouter serves an Anthropic-compatible `/v1/messages`, so pointing at
+ * `https://openrouter.ai/api` is the entire provider switch — the SDK, the
+ * tool loop, adaptive thinking, `effort`, `cache_control`, and the cache-token
+ * fields of `usage` all work there unmodified. What does *not* carry over is
+ * the model id: OpenRouter needs a provider prefix, so `MODEL` must be set to
+ * `anthropic/claude-sonnet-5` rather than `claude-sonnet-5`. Set one without
+ * the other and every turn fails with a not-found error.
+ *
+ * Note the URL stops at `/api`, with no `/v1`. The SDK appends `/v1/messages`
+ * itself, so the usual `https://openrouter.ai/api/v1` from OpenRouter's docs
+ * resolves to `/api/v1/v1/messages` and 404s — which surfaces to the user as
+ * the generic `api_404` "something went wrong", giving no hint that the URL is
+ * the problem.
+ */
+export const BASE_URL = process.env.ANTHROPIC_BASE_URL;
+
+/**
+ * Model used for chat. Sonnet 5 balances quality and latency for conversation.
+ * Needs a provider prefix when `BASE_URL` points at OpenRouter — see above.
+ */
 export const MODEL = process.env.ASKPBOT_MODEL ?? "claude-sonnet-5";
 
 /**
@@ -699,11 +763,11 @@ export const PROMPT_LEAK_SENTINEL = "You are PBot, a panda-mascot AI assistant";
 ```
 
 #### `lib/agent.ts`  
-_178 lines_
+_214 lines_
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { EFFORT, MAX_TOKENS, MAX_TOOL_ITERATIONS, MODEL } from "./config";
+import { BASE_URL, EFFORT, MAX_TOKENS, MAX_TOOL_ITERATIONS, MODEL } from "./config";
 import { SYSTEM_PROMPT } from "./prompt";
 import { runTool, TOOLS } from "./tools";
 import type { Attachment, Role, StreamEvent, TurnUsage } from "./types";
@@ -774,6 +838,24 @@ function toContent(
   return blocks;
 }
 
+/**
+ * True only for "an upstream content filter blocked this turn".
+ *
+ * Anthropic direct signals a declined turn in-band: HTTP 200 with
+ * `stop_reason: "refusal"`. Through a gateway the same turn can instead fail
+ * the whole request, because the filter runs in front of the model and there is
+ * no message to return. Without this, a declined question surfaces to the user
+ * as a generic server error.
+ *
+ * Deliberately narrow. Auth failures, rate limits, bad requests, and provider
+ * outages must keep surfacing as errors — turning every 400 into a polite
+ * decline would hide real breakage behind an in-character message.
+ */
+function isContentFilterBlock(error: unknown): boolean {
+  if (!(error instanceof Anthropic.APIError)) return false;
+  return JSON.stringify(error.error ?? {}).includes("content_policy_violation");
+}
+
 export async function runTurn(
   history: { role: Role; content: string; image?: Attachment }[],
   options: RunTurnOptions = {},
@@ -782,7 +864,9 @@ export async function runTurn(
   const startedAt = options.startedAt ?? Date.now();
   const emit = (event: StreamEvent) => onEvent?.(event);
 
-  const client = new Anthropic();
+  // `baseURL: undefined` is the SDK's own default, so this is a no-op when the
+  // env var is unset and a provider switch when it is set.
+  const client = new Anthropic({ baseURL: BASE_URL });
   const messages: Anthropic.MessageParam[] = history.map((m) => ({
     role: m.role,
     content: toContent(m),
@@ -827,26 +911,42 @@ export async function runTurn(
       { signal },
     );
 
-    for await (const event of turn) {
-      if (event.type === "content_block_start") {
-        const block = event.content_block;
-        if (block.type === "thinking") {
-          emit({ type: "status", value: "thinking" });
-        } else if (block.type === "tool_use") {
-          toolCalls.push(block.name);
-          emit({ type: "status", value: "tool" });
-          emit({ type: "tool_use", name: block.name });
-        } else if (block.type === "text") {
-          emit({ type: "status", value: "generating" });
+    let message: Anthropic.Message;
+    try {
+      for await (const event of turn) {
+        if (event.type === "content_block_start") {
+          const block = event.content_block;
+          if (block.type === "thinking") {
+            emit({ type: "status", value: "thinking" });
+          } else if (block.type === "tool_use") {
+            toolCalls.push(block.name);
+            emit({ type: "status", value: "tool" });
+            emit({ type: "tool_use", name: block.name });
+          } else if (block.type === "text") {
+            emit({ type: "status", value: "generating" });
+          }
+        } else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+          ttftMs ??= Date.now() - startedAt;
+          text += event.delta.text;
+          emit({ type: "text", value: event.delta.text });
         }
-      } else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-        ttftMs ??= Date.now() - startedAt;
-        text += event.delta.text;
-        emit({ type: "text", value: event.delta.text });
       }
+
+      message = await turn.finalMessage();
+    } catch (error) {
+      if (!isContentFilterBlock(error)) throw error;
+      // Same situation as `stop_reason: "refusal"` below, reported as a failed
+      // request instead of a completed one. Reported as a refusal so the user
+      // gets the panda's decline rather than "something went wrong", and so
+      // logs and evals see one refusal concept rather than two.
+      stopReason = "refusal";
+      if (text.length === 0) {
+        text = REFUSAL_FALLBACK;
+        emit({ type: "text", value: REFUSAL_FALLBACK });
+      }
+      break;
     }
 
-    const message = await turn.finalMessage();
     usage.inputTokens += message.usage.input_tokens;
     usage.outputTokens += message.usage.output_tokens;
     usage.cacheReadTokens += message.usage.cache_read_input_tokens ?? 0;
@@ -4367,7 +4467,7 @@ body {
 ### 6.6 Evals
 
 #### `evals/run.ts`  
-_569 lines_
+_573 lines_
 
 ```ts
 import { config } from "dotenv";
@@ -4375,7 +4475,7 @@ config({ path: [".env.local", ".env"], quiet: true });
 
 import Anthropic from "@anthropic-ai/sdk";
 import { runTurn, type TurnResult } from "../lib/agent";
-import { MODEL } from "../lib/config";
+import { BASE_URL, MODEL } from "../lib/config";
 import {
   screenInput,
   screenOutput,
@@ -4409,8 +4509,12 @@ import type { ImageMediaType } from "../lib/types";
  * It is a smoke test for tone regressions, not an oracle.
  */
 
-const JUDGE_MODEL = process.env.ASKPBOT_JUDGE_MODEL ?? "claude-sonnet-5";
-const client = new Anthropic();
+// Defaults to the chat model rather than a hardcoded id so a provider switch
+// carries the judge with it. Under OpenRouter model ids need a provider prefix,
+// and a judge pinned to a bare `claude-sonnet-5` would fail every subjective
+// case while the mechanical ones passed — a confusing half-red suite.
+const JUDGE_MODEL = process.env.ASKPBOT_JUDGE_MODEL ?? MODEL;
+const client = new Anthropic({ baseURL: BASE_URL });
 
 interface Check {
   name: string;
