@@ -36,6 +36,7 @@ differs. No model case has ever run against Anthropic direct.
 | Model evals | Persona, safety, tools, memory | 2026-09-02 | **18/19** — one real failure |
 | Cloudflare worker build | `opennextjs-cloudflare build` | 2026-08-23 | Pass |
 | Workers-runtime behaviour | `wrangler dev` on `workerd` | 2026-08-23 | Pass, 8 paths |
+| Deploy **configuration** | Worker vars + secret on `workerd`, no `.env.local` | 2026-09-02 | Pass, real streamed turn |
 | Deployed probes | Live URL | **Never run** | **Unknown** |
 
 ---
@@ -267,6 +268,32 @@ under Node.
 > runtime. Workers limits CPU time rather than wall clock, and a turn spends
 > almost all of its time waiting on the Anthropic API rather than computing, so
 > this is expected to be fine — **expected, not measured.**
+
+### Deploy configuration, verified 2026-09-02
+
+The mechanism a deployed Worker uses to get its config was tested without
+deploying. `opennextjs-cloudflare preview` runs the real `workerd` and reads
+`vars` from `wrangler.jsonc` plus secrets from `.dev.vars` — the same
+`populateProcessEnv` path production uses.
+
+The first run proved less than it looked like it did: the build bakes `.env*`
+files in, and `.env.local` held the same two provider vars, so it could not
+distinguish "the Worker vars work" from "the baked env vars work". It was
+re-run with `.env.local` moved aside and the app rebuilt from scratch, which is
+what the hosted builder sees when it clones the repo.
+
+| Checked | Result |
+| --- | --- |
+| `GET /` and `GET /embed` on `workerd` | 200 |
+| Streamed turn, tool round-trip, real key | Pass — correct date via `get_current_time` |
+| Same, with **no `.env.local` at build or runtime** | Pass — config came from `wrangler.jsonc` vars + the secret alone |
+
+So a deploy needs exactly one manual step: set `ANTHROPIC_API_KEY` as a secret.
+`ANTHROPIC_BASE_URL` and `ASKPBOT_MODEL` ship in `wrangler.jsonc`.
+
+**This is still not a deploy.** It proves the configuration mechanism, on the
+right runtime, on this machine. It says nothing about Cloudflare's build
+environment, the network path, or the live URL — see below.
 
 ## Layer 6 — Deployed probes
 

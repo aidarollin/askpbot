@@ -38,6 +38,46 @@ Entry shape: **Done / Decided / Blocked / Next**.
 
 ---
 
+## 2026-09-02 (later) — Deploy configuration proven; the deploy itself still not run
+
+**Done**
+
+- Moved `ANTHROPIC_BASE_URL` and `ASKPBOT_MODEL` into `wrangler.jsonc` as
+  `vars`, so they deploy with the code. Only the API key stays a secret. Same
+  reasoning as the build-command fix on 2026-08-26: a dashboard-only setting is
+  invisible from the repo, undocumented, and lost if the project is recreated.
+- Verified the deploy *configuration* on the real Workers runtime without
+  deploying, via `opennextjs-cloudflare preview`. Pages 200; a real streamed
+  turn with the tool round-trip passed.
+- **Re-ran that test properly.** The first run was not evidence: the build bakes
+  `.env*` in, and `.env.local` carried the same two vars, so a pass could not
+  tell "Worker vars work" from "baked env vars work". Moved `.env.local` aside,
+  rebuilt from scratch — what the hosted builder actually sees — and the turn
+  still passed. That isolates `wrangler.jsonc` vars + secret as the source.
+- Fixed the runbook's deploy section, which still said the key was the only
+  setting needed. Following it after the OpenRouter switch would have produced a
+  deploy that loads pages and fails every turn.
+
+**Found**
+
+- `npm run build` fails with `EPERM ... rm .open-next` while `npm run dev` is
+  running — the dev server legitimately holds `workerd` open. Same error as the
+  leaked-process bug in `next.config.ts`, unrelated cause. Noted in `CLAUDE.md`.
+
+**Blocked**
+
+- **The deploy still has not been run, and cannot be from here.** `wrangler
+  whoami` reports not authenticated; `wrangler login` opens a browser and is an
+  account action. Everything up to that point is now verified.
+
+**Next**
+
+1. `npx wrangler login`, then set the secret, then deploy — or, if Workers
+   Builds is already connected, set the secret in the dashboard and re-trigger
+   the build, since setting a secret does not redeploy on its own.
+2. Probe the live URL and fill in Layer 6 of RELIABILITY.md.
+3. Click through the UI. Still the oldest unverified row.
+
 ## 2026-09-02 — A real key, the first model evals ever, and OpenRouter
 
 **Done**

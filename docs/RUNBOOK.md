@@ -117,6 +117,29 @@ npm run deploy                                       # build + deploy
 `npm run deploy` is `opennextjs-cloudflare build && opennextjs-cloudflare
 deploy`. The worker name is `askpbot`, set in `wrangler.jsonc`.
 
+**The key is the only thing you set by hand.** `ANTHROPIC_BASE_URL` and
+`ASKPBOT_MODEL` live in `wrangler.jsonc` under `vars`, so they deploy with the
+code. Only `ANTHROPIC_API_KEY` is a secret. Whatever endpoint `vars` points at,
+the key must be a key *that endpoint accepts* — an Anthropic key against
+OpenRouter fails exactly as an OpenRouter key against Anthropic does.
+
+Both reach the route the same way: the adapter's `populateProcessEnv` copies
+every Cloudflare var and secret onto `process.env` per request. This is *not*
+how local dev works — there, `.env.local` is what counts and `.dev.vars` is
+ignored by `next dev`. Do not reason from one to the other.
+
+### If the repo is connected to Cloudflare Workers Builds
+
+Pushing to `main` triggers a build and deploy; there is no `npm run deploy`
+step. The secret still has to be set once, in **Workers → askpbot → Settings →
+Variables and Secrets**, because a secret cannot come from the repo. Setting it
+does not redeploy — push again, or hit *Retry build*, or the running Worker
+keeps the old (missing) value.
+
+A build that reports success and then fails at deploy with `Could not find
+compiled Open Next config` means the project's build command is not
+`npm run build`. See STATUS 2026-08-26.
+
 **After the first deploy.** ⛔
 
 1. Run the *Verify a running server* block against the live URL.

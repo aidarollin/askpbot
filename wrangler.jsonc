@@ -7,6 +7,18 @@
 		"nodejs_compat",
 		"global_fetch_strictly_public"
 	],
+	// Non-secret provider config. Kept here rather than as dashboard fields so
+	// it is versioned, reviewable, and survives the project being recreated —
+	// a dashboard-only setting is invisible from the repo and silently wrong.
+	// The API key is NOT here: it is a secret, set with `wrangler secret put`.
+	//
+	// These two move together. Pointing at OpenRouter without the provider
+	// prefix on the model (or the reverse) fails every turn with a not-found.
+	// Delete both to go back to Anthropic direct.
+	"vars": {
+		"ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+		"ASKPBOT_MODEL": "anthropic/claude-sonnet-5"
+	},
 	"assets": {
 		"directory": ".open-next/assets",
 		"binding": "ASSETS"
