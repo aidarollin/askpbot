@@ -5,7 +5,9 @@ It ships as a **two-column web app** — history in a persistent sidebar, hero o
 conversation in the main column — and the same assistant is available as a
 **right-docked slide-in panel** for embedding in a host app. Streaming replies,
 persisted conversation history, image understanding, tool use, layered
-guardrails, an eval suite, and per-turn observability.
+guardrails, an eval suite, and per-turn observability. The look is the Pandai
+student UI's own AskPBot design — its stylesheet, art and animated PBot —
+synced from `pandai.question.uiux` rather than redrawn.
 
 **Live demo:** _(add the Cloudflare Workers URL here after the first deploy)_
 
@@ -35,6 +37,7 @@ Get an API key at [console.anthropic.com](https://console.anthropic.com/settings
 | `npm run eval` | Full suite, including real model turns (costs a few cents) |
 | `npm run check` | typecheck + lint + offline evals |
 | `npm run preview` | Build the Cloudflare worker and run it on the real `workerd` runtime |
+| `npm run design:sync` | Re-pull the AskPBot design from a `pandai.question.uiux` checkout beside this repo — see *Ported from the Pandai student UI* |
 | `npm run deploy` | Build and deploy to Cloudflare Workers (needs `wrangler login`) |
 
 ---
@@ -57,6 +60,8 @@ window.dispatchEvent(new CustomEvent("pbot-open"));
 
 That is the same contract the original Blade/Alpine component used, so an
 existing host page keeps working unchanged. Esc, the scrim, or the X closes it.
+On closing, the panel fires `pbot-closed` on `window` — the floating PBot uses
+it to come back from his "poof", and a host can listen for it the same way.
 
 `/` is the app itself. **`/embed`** is the panel demo: a stand-in host page for
 the panel to slide over, and living documentation of the integration contract —
@@ -68,9 +73,10 @@ in one is in the other's history.
 
 ## What it does
 
-- **Two-column web layout** — a sidebar carrying the brand, *Start New Chat* and
-  the full grouped history, beside a main column showing either the hero
-  (podium mascot, greeting, starter prompts) or the open conversation.
+- **Two-column web layout** — one deep-space field: a rail carrying the Ask PBot
+  card, *Start a New Chat* and the grouped history, beside a main pane with one
+  top bar over either the idle hero (PBot waving, the question typed in,
+  starter prompts, a composer) or the open conversation.
 - **Starter prompts** — four chips, on the hero and inside any conversation
   that has no question yet. A hero chip opens the conversation and asks in one
   press.
@@ -80,8 +86,16 @@ in one is in the other's history.
 - **Streaming chat** — tokens appear as generated, with typing dots and a phase
   label that distinguishes *thinking* from *checking the time* from *writing*.
 - **Persisted history** — conversations save as you chat, grouped Today /
-  Yesterday / Previous 7 Days / month, and reopen where you left them.
-- **Image understanding** — attach a JPEG, PNG, WebP or GIF and ask about it.
+  Yesterday / Previous 7 Days / month, and reopen where you left them. Each row
+  flips in place to Back / Rename / Delete; the open chat's name is also
+  editable where it is shown (top bar, panel chip).
+- **Markdown replies** — bold, lists, code, links and tables, rendered as React
+  elements, never as an HTML string.
+- **Voice notes** — record, review with a live waveform and playback, send. The
+  browser transcribes the take and the words are the turn; the bubble keeps the
+  waveform, the clip, and what was heard.
+- **Image understanding** — attach a JPEG, PNG, WebP or GIF and ask about it;
+  tap the sent picture to open it in a viewer.
 - **Per-message actions** — copy (with a confirmation tick), thumbs-up (which
   reaches the server and lands in the log stream), and regenerate.
 - **Tool use** — a `get_current_time` tool the model calls when the answer
@@ -100,8 +114,10 @@ in one is in the other's history.
 app/
   page.tsx                 the app — renders PBotWeb
   embed/page.tsx           panel demo + host stand-in (pbot-open contract)
-  layout.tsx               metadata, fonts, theme colour
-  globals.css              host tokens + the ported .pbot-* design system
+  layout.tsx               metadata, fonts (Poppins for PBot), theme colour
+  globals.css              host page tokens; imports the two below
+  pbot.css                 GENERATED — the source design system's own rules
+  pbot-host.css            what this app adds on top (host fit + our extra parts)
   api/chat/route.ts        POST: transport, guardrails, rate limit, logging
   api/feedback/route.ts    POST: thumbs-up signal -> structured log
 lib/
@@ -116,15 +132,27 @@ lib/
   log.ts                   structured turn + feedback logging
   types.ts                 wire types + stream event union
 components/pbot/
-  PBotPanel.tsx            portal, scrim, header, focus management
-  PBotHome.tsx             Start New Chat + dated history list
-  PBotChat.tsx             transcript, typing indicator, telemetry line
-  PBotTurn.tsx             one turn + per-message actions
-  PBotComposer.tsx         input, auto-grow, attach, send/stop
-  PBotMascot.tsx           fixed bottom-right launcher
+  PBotWeb.tsx              the web page: rail, top bar, idle hero
+  PBotPanel.tsx            the docked panel: portal, scrim, home, focus management
+  PBotChat.tsx             the chat screen both surfaces share
+  PBotTurn.tsx             one turn: text / markdown / image / voice bubble + actions
+  PBotComposer.tsx         field, send/stop, image, voice bar (chat + hero variants)
+  PBotHistory.tsx          empty state, or the card of rows with the in-row menu
+  PBotSuggestions.tsx      starter prompts (hero, and collapsible in-chat)
+  PBotTitle.tsx            the open chat's name, renamable in place
+  PBotMarkdown.tsx         reply markdown -> React elements
+  PBotRive.tsx             PBot, animated (Rive canvas, self-hosted WASM)
+  PBotMascot.tsx           the floating PBot launcher
   PBotLauncher.tsx         plain button launcher (host-app example)
+  ds.tsx                   DS primitives: Icon, Btn, IconBtn — the source's markup
+  behaviors.ts             button bounce, scroll-edge fades, typewriter
+  useVoice.ts              recorder, waveform, transcription, playback
   usePBot.ts               the state machine + NDJSON stream reader
-  icons.tsx                inlined Feather-style icons
+scripts/pbot-design/
+  sync.mjs                 pulls CSS, art, icons and the Rive file from the source
+  collect-classes.mjs      records which classes the source renders (input to sync)
+  classes.json             that record
+public/pbot/               GENERATED — art, icon sprite, pbot.riv, rive.wasm
 evals/
   run.ts                   the eval suite
 ```
@@ -137,64 +165,90 @@ NDJSON events back → per-turn log line to stdout.
 
 ## Ported from the Pandai student UI
 
-This is a port of the TALL-stack (Blade + Alpine + CSS) `AskPBot` component. The
-source stylesheet ships **two** shells over one feature — `.pbot-web` (two
-columns) and `.pbot-panel` (docked overlay). Both are built here, sharing the
-state machine, the stream reader, the turn rendering, and the CSS.
+This is a port of the TALL-stack (Blade + Alpine + CSS) `AskPBot` component in
+`pandai.question.uiux`. That source ships **two** shells over one feature —
+`.pbot-web` (the two-pane page, `lab/askpbot`) and `.pbot-panel` (the docked
+slide-in). Both are built here, sharing the state machine, the stream reader,
+the chat screen, the history, and the CSS — the same sharing the source does
+with its `_askpbot-chat` and `_askpbot-history` partials.
 
-**Kept, deliberately** — the two-column geometry (sidebar `minmax(248px, 316px)`
-beside the main column), the panel geometry (412px, docked, 15px inset, `#d5edfb`
-on a `#0071a2` border), the deal-off-a-deck motion, the `#30A9E5` glow, the
-asymmetric bubble corners (bot top-left 4px, user top-right 4px), the
-avatar-beside-bot-bubble layout, the three-dot typing animation, the day-grouped
-history, the starter prompt chips, the composer's corner-radius steps, the
-compose bar with send and attach, the disclaimer, and the `pbot-open` contract.
+### How the design gets here
 
-**Made real** — the Alpine component's `send()` was a `setTimeout` mock and its
-`history` was a hardcoded array. Both are now genuine: streaming Claude calls,
-and conversations persisted to `localStorage` with the same date grouping. Copy,
-thumbs-up, and regenerate went from decorative buttons to working actions.
+The design is **synced, not redrawn**. The first port (2026-08) re-typed the
+source's CSS into `globals.css` with emoji standing in for art that had not been
+supplied. On 2026-10-02 it was replaced by a pipeline:
 
-**Added, beyond the source** — image attachment end to end, the phase label that
-separates *thinking* from *checking the time* from *writing*, per-turn token and
-latency telemetry, in-band stream error rendering, and a kebab menu on history
-rows so delete takes two presses instead of sitting one misclick away.
+1. `scripts/pbot-design/collect-classes.mjs` drives the running source app
+   through every state this port ships — idle hero, chat, streaming, the history
+   row's menu / rename / delete, a voice take, an image and its viewer, the
+   panel — and records every class the DOM actually carries. Rendered DOM, not a
+   grep of the Blade files, because `<x-btn>` expands into classes the templates
+   never mention.
+2. `npm run design:sync` keeps every source rule whose selector uses only those
+   classes, plus the design tokens and keyframes they reference, and writes
+   `app/pbot.css` with a header naming the source commit. It copies the art the
+   rules and the components reference into `public/pbot/`, cuts the 424KB icon
+   sprite down to the 17 glyphs used, and copies `pbot.riv`.
+3. The React components emit the **source's markup, class for class**, so those
+   rules apply unchanged. `components/pbot/ds.tsx` is the source's `<x-icon>`,
+   `<x-btn>` and `<x-icon-btn>`.
+
+`app/pbot.css` is generated: never edit it. A host-specific fix goes in
+`app/pbot-host.css`, which says for each rule whether it adapts the source to
+this app (no Pandai header to subtract, no Alpine `x-show`) or styles a part
+the source does not have.
+
+### What came over, and what did not
+
+**Kept** — the deep-space field with its spheres, glows, sparkles, grid and
+watermark; the rail with the Ask PBot card; the single top bar; the idle hero
+with PBot in his halo and the question typed in; the bubbles drawn from the DS
+border-image art, with PBot's analysing avatar and the student's face; the
+latest-reply shine; the collapsible in-chat suggestions; the composer's fused
+field-and-send, the mic and image buttons and the disclaimer; the image chip
+and viewer; the voice bar and voice bubble; the history card with its in-row
+Back / Rename / Delete; the panel's slide-in, podium and chat header with the
+renamable chip; the floating PBot and his poof; the DS push-button bounce; the
+soft scroll edges; and the `pbot-open` contract.
+
+**Made real** — the source's `send()` streams a mock and its replies are
+canned. Here they are streaming Claude calls. Its history was localStorage
+already; here it is also an external store, so the rail updates as you chat and
+other tabs follow. Its voice notes are recorded but never understood; here they
+are transcribed (below) and the words are the turn.
+
+**Added, beyond the source** — the phase label that separates *thinking* from
+*checking the time* from *writing*; per-turn token and latency telemetry;
+in-band stream errors; a character count near the input limit; the transcript
+under a voice bubble; editing the chat's name from the web top bar; and
+thumbs-up, which reaches `/api/feedback`.
+
+**Changed, on purpose:**
+
+| Source | Here | Why |
+| --- | --- | --- |
+| `x-html="md(text)"` — a regex escaper | `react-markdown`, no raw HTML | The source escapes `& < >` but not `"`, so a link URL in model output can break out of its `href`. React elements have no such seam — see *Markdown, as elements* below |
+| Thumbs-down opens a "What's Wrong?" report | Thumbs-up, logged | The report modal posts nowhere real; the existing feedback route takes a rating. Not ported, not refused — not chosen in the 2026-10-02 re-scope |
+| Up to 4 images a message | One | The API's message shape takes one image. The chip row renders in its single-chip layout |
+| Hero copy in Malay ("Apa kita nak belajar hari ini?") | English | The persona is tuned and evaluated in English; see *Internationalisation* in SCOPE.md |
+| The student's real avatar | The DS's illustrated default | No accounts here, so no one to picture |
+| The rail's tab deck toggles Ask PBot ⇄ Math Drill | One card, not a control | Math Drill is not built |
+| PBot's Rive WASM from the package default (unpkg) | Self-hosted at `/pbot/rive/rive.wasm` | No third-party fetch on page load. `@rive-app/canvas` is pinned exact because the WASM is copied from it |
 
 **Dropped** — each with its reason in [docs/SCOPE.md](docs/SCOPE.md):
 
 | Dropped | Why |
 | --- | --- |
-| Math Drill, the tab deck, and the level-complete and report modals | The extract itself recommends this for a general-purpose bot, and a switcher with one tab is chrome |
-| Markdown rendering (the source does `x-html="md(m.text)"`) | Rendering model output as HTML is the largest injection surface in the app. Plain text is correct and safe until there is a sanitiser |
-| The mic button | Voice is a second modality and a whole class of failure modes, for no requirement in the brief |
-| Cursor gaze-follow, and the mascot's poof-open transition | Motion polish on an asset that was never supplied. On an emoji placeholder they read as a bug |
-| The `ds-scroll` custom scrollbar | Native overflow scrolling is accessible, free, and correct on touch. The source's version is a component with three observers in it |
-
-**Substituted** — the binary assets were never supplied, so rather than invent
-lookalikes: `bg-ellipse.svg` is an inline radial gradient at the same `#30A9E5`;
-the podium base and stage are CSS discs at the source's geometry, with the rise
-animation intact; and the mascot and avatar are emoji. Swap points are marked in
-`icons.tsx`, `PBotMascot.tsx` and `PBotPodium.tsx`.
-
-Five real files would replace all of it:
-
-```
-Themes/app/assets/images/mascot/pbot-awe.svg       bot avatar + brand mark
-Themes/app/assets/images/mascot/pbot.svg           podium mascot
-themes/app/assets/images/askpbot/podium.svg        podium base
-themes/app/assets/images/askpbot/podium-stage.svg  podium stage
-build/assets/bg-ellipse-*.svg                      the glow
-```
-
-The tab PNGs and the modal mascots went with Math Drill and are not needed.
-(An earlier version of this section named `rive/pbot.riv` as the mascot swap
-point — the extract renders `pbot.svg`, so Rive is not required.)
+| Math Drill, the tab deck's second card, and the level-complete and report modals | General-purpose bot; a switcher with one tab is chrome |
+| The `ds-scroll` custom scrollbar | Native overflow scrolling is accessible, free, and correct on touch |
+| Cursor gaze-follow | Removed from the source's launcher too ("dont make it interact with mouse") |
+| The Pandai app chrome around the lab page (header, pill nav, footer) | It is the host app's, not AskPBot's |
 
 **One judgement call worth flagging:** both surfaces keep their brand colours in
-dark mode instead of inverting. The panel is a fixed-identity surface floating
-over a host app whose theme it does not control, and a dark azure panel is a
-different product rather than a dark variant. The `/embed` host page does follow
-the system theme.
+dark mode instead of inverting — `sync.mjs` skips the source's `dark.css`. The
+panel is a fixed-identity surface floating over a host app whose theme it does
+not control, and a dark azure panel is a different product rather than a dark
+variant. The `/embed` host page does follow the system theme.
 
 ---
 
@@ -280,15 +334,19 @@ A pre-screen block returns **200 with a streamed refusal**, not an error status:
 from the user's side PBot declined, which is what happened. A 4xx would render
 as a broken panel.
 
-### History in localStorage; images not persisted
+### History in localStorage; images and voice clips not persisted
 
 The API route stays fully stateless — no session store, no sticky routing, any
 instance serves any turn — so history lives in the browser. It is per-browser
 and does not sync; moving to a real store means reimplementing one module.
+Components read it through `useSyncExternalStore`, so every save, rename and
+delete reaches every surface, and the `storage` event carries it across tabs.
 
 Attachments are stripped before saving. A base64 image is easily a megabyte
 against a ~5MB quota, so two screenshots would evict the entire history. Saved
-turns keep a marker showing an image was sent.
+turns keep a marker showing an image was sent. A voice note keeps its waveform,
+length and transcript; its clip is a `blob:` URL that dies with the tab, so a
+reopened chat shows the bubble with playback disabled.
 
 ### Rate limiting is in-memory, and that is a known limitation
 
@@ -297,12 +355,27 @@ N × the configured number. Fine for stopping one tab from hammering the API and
 **wrong** for real abuse prevention. `check()` is shaped so swapping in Cloudflare
 KV / Upstash Redis is a one-file change.
 
-### Plain text rendering, not markdown
+### Markdown, as elements
 
-Assistant output renders as whitespace-preserved text. Rendering model output as
-HTML is the app's biggest injection surface, and doing it safely needs a
-sanitiser plus a hardened renderer. Text is correct and safe today; markdown is
-additive behind `PBotTurn`.
+Replies render as markdown (re-scoped in 2026-10-02 — until then they were plain
+text, for the reason below). Model output is the app's biggest injection
+surface, so the renderer never produces an HTML string: `react-markdown` builds
+React elements, raw HTML in a reply is dropped as text (no `rehype-raw`), its
+default `urlTransform` strips `javascript:` and other unsafe link targets,
+links open in a new tab with `noopener noreferrer`, and an image in a reply
+becomes a link rather than a fetch. That is what the source's own `md()` got
+wrong, and why it was not ported.
+
+### Voice notes go through the browser's speech recognition
+
+No audio reaches the model — this API path takes text and images. A voice note
+is recorded (for the bubble and playback) *and* transcribed by the Web Speech
+API in parallel, and the transcript is the turn. It passes the same guardrails
+as typed text. Two costs, stated: Firefox has no Web Speech API, so the mic says
+so there rather than recording something PBot cannot hear; and in Chrome the
+recognition runs on Google's servers — the browser's implementation, not this
+app's, but the audio does leave the device. A take with no recognised words is
+refused rather than sent.
 
 ### Regenerate only on the last turn
 
@@ -414,15 +487,20 @@ Stated plainly, because pretending they don't exist is worse than having them:
 - **Rate limiting is per-instance**, not global. See above.
 - **The LLM judge grades its own family.** Directional, not authoritative.
 - **History is per-browser** and does not sync across devices.
-- **Images aren't kept in history** — only a marker that one was sent.
+- **Images and voice clips aren't kept in history** — only a marker that an
+  image was sent, and a voice note's waveform and transcript.
+- **Voice notes need the Web Speech API** — Chrome, Edge, Safari; not Firefox.
+  Chrome sends the audio to Google for recognition.
 - **No auth.** Anyone with the URL can spend your tokens; the rate limit is the
   only brake. Add auth before pointing real traffic at it.
-- **Plain-text rendering.** Code blocks are not syntax highlighted.
+- **Code blocks are not syntax highlighted.**
 - **The content pre-screen is narrow by design** and will not catch creative
   phrasings. That is the model's job, deliberately.
 - **No streaming-level output filtering.** The leak check runs on the completed
   turn, so it detects and logs rather than intercepts.
-- **Mascot and avatar are emoji placeholders** pending the real assets.
+- **The design is a snapshot.** `app/pbot.css` matches the source commit in
+  its header; `npm run design:sync` has to be re-run (with the source app
+  running, for `collect-classes.mjs`, if new states appear) to follow it.
 
 ---
 
@@ -433,6 +511,4 @@ Roughly in order of value:
 1. Shared-store rate limiting (Cloudflare KV) — the one limitation with real
    production consequences.
 2. Auth, so the demo URL isn't an open token faucet.
-3. Drop in the real `pbot-awe.svg` and `pbot.riv` assets.
-4. Markdown rendering with a sanitiser.
-5. Server-side history, so conversations follow the user across devices.
+3. Server-side history, so conversations follow the user across devices.

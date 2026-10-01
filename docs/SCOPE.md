@@ -3,7 +3,7 @@
 _The boundary. What is being built, by when, what counts as failure, and what
 is explicitly not being built._
 
-Last reviewed: 2026-08-23
+Last reviewed: 2026-10-02
 
 ---
 
@@ -75,6 +75,10 @@ Committed. These are the things whose absence would make it incomplete.
 | Structured per-turn logging | Built |
 | Eval suite, offline + model | Built |
 | Image attachment and understanding | Built |
+| The source's current AskPBot design — synced from `pandai.question.uiux`, not redrawn | Built 2026-10-02 |
+| Markdown replies, rendered as elements | Built 2026-10-02 — re-scoped, see log |
+| History rename, and the in-row Back / Rename / Delete menu | Built 2026-10-02 — re-scoped, see log |
+| Voice notes (recorded, transcribed in the browser, sent as text) | Built 2026-10-02 — re-scoped, see log |
 | **Live web retrieval with citations** | **Not started — re-scoped 2026-08-23, see log below** |
 | **Deployment to a real environment** | **Configured for Cloudflare Workers and verified locally on `workerd`; not yet deployed — see STATUS.md** |
 | **Reliability checks against the deployed URL** | **Not started** |
@@ -92,10 +96,10 @@ Each line names why, because "no" without a reason invites relitigating.
 | **Freshness telemetry and force-re-crawl** | Follows from the line above. Server-side fetch does not report whether a page was served warm or cold, and exposes no re-crawl hook. The UI may honestly say a source was _fetched during this turn_; it may not claim "cached 12 hrs ago". Reproducing that needs our own fetcher, which is the vector-store decision again under a different name. |
 | **Math Drill and the two-tab switcher** | Product-specific to the Pandai student app. The source extract itself recommends dropping it for a general-purpose bot. |
 | **Server-side history sync across devices** | History is per-browser in `localStorage`. A synced store needs a database, a migration story, and auth (see above) to know whose history it is. |
-| **Markdown rendering of model output** | Rendering model output as HTML is the largest injection surface in the app. Doing it safely needs a sanitiser plus a hardened renderer. Plain text is correct and safe today. |
-| **Podium mascot rise, cursor gaze-follow, and the poof-open transition** | Motion polish on assets that were never supplied. The podium geometry and its rise are built; the gaze-follow and the poof need the real mascot to read as anything but a moving emoji. Revisit when `pbot.svg` lands, not before. |
+| **Cursor gaze-follow** | The real mascot arrived (2026-10-02, as a Rive file) and the podium rise and the launcher's poof came with it. Gaze-follow did not: the source itself removed it from the launcher ("dont make it interact with mouse"), so porting it would contradict the design being ported. |
 | **The `ds-scroll` custom scrollbar** | The source ships a hand-built scrollbar with a draggable thumb, a ResizeObserver and an IntersectionObserver. Native overflow scrolling is accessible, free, and behaves correctly on touch. Reimplementing it buys appearance and costs a component with three observers in it. |
-| **Voice input or text-to-speech** | Adds a second modality, browser permission handling, and a whole class of failure modes, for no requirement in the brief. |
+| **Text-to-speech, and audio to the model** | Voice *input* is built (2026-10-02) as browser-side transcription. PBot speaking back, or sending audio itself to a model, is a second modality and a second provider question — no audio input exists on the current API path. |
+| **Math Drill's "What's Wrong?" / Report modals** | The source's report modals post nowhere real. Offered in the 2026-10-02 re-scope and not chosen; thumbs-up into `/api/feedback` stays. |
 | **A native mobile app** | The panel is responsive and works in a mobile browser. A native shell is a different project. |
 | **Internationalisation** | The persona is written and tuned in English. Translating it means re-tuning and re-evaluating the persona per language. |
 | **An admin dashboard or analytics UI** | Logs are structured JSON on stdout and queryable in the platform's log viewer. A UI on top is presentation, not capability. |
@@ -136,4 +140,5 @@ undocumented scope change is a scope failure.
 | 2026-08-23 | **Starter prompt chips ported; four other source behaviours recorded as dropped.** The first port omitted the chips silently. They are now built (hero and empty-chat, as in the source), along with the composer's corner-radius steps. The podium rise is built; gaze-follow, poof-open and `ds-scroll` are now on the not-building list with reasons. | Self | Housekeeping forced by the rule that the README's port record must be accurate. An omission nobody wrote down is indistinguishable from a bug. |
 | 2026-08-23 | **Cloudflare Workers, reversing the 2026-08-17 move to Vercel.** `@opennextjs/cloudflare` plus `wrangler`; `wrangler.jsonc` and `open-next.config.ts` committed. Closes the capstone's AWS-or-Cloudflare requirement (blocker 2). | Self (pre-mentor) | Verified locally on the real Workers runtime before committing: both routes, validation, NDJSON streaming and the in-band error path all behave as they do on Node. Still **needs mentor sign-off** — it is recorded here so the decision is written down, not so it is settled. |
 | 2026-09-02 | **Model traffic routed through OpenRouter instead of Anthropic direct.** Driven by which API key was actually available, not by a technical preference. Costs nothing structurally: OpenRouter serves an Anthropic-compatible `/v1/messages`, so `@anthropic-ai/sdk`, the tool loop, adaptive thinking, `effort`, `cache_control` and cache-token `usage` all work unchanged. The switch is two env vars, and `ANTHROPIC_BASE_URL` unset still means Anthropic direct — this is a configuration, not a fork. | User (asked directly, 2026-09-02) | The earlier framing of this as "a rewrite of `lib/agent.ts` and the loss of six Anthropic-specific behaviours" was wrong, and was written without testing the endpoint. Measured cost is one behavioural regression, in safety declines — see the note under *Not building*, and RELIABILITY.md. |
+| 2026-10-02 | **The AskPBot design re-synced from `pandai.question.uiux`, and three dropped features re-scoped in.** The source's design had moved well past the 2026-08 port and now ships its real art and an animated (Rive) PBot. It is brought over by extraction (`npm run design:sync`), not re-typed. Re-scoped in, by choice: **markdown replies** (as React elements via `react-markdown` — the source's own regex renderer has an attribute-injection hole and was not ported), **history rename** with the source's in-row menu, and **voice notes**. Math Drill, `ds-scroll`, gaze-follow and the report modals stay out. | User (asked directly, 2026-10-02) | Voice's cost, stated: no audio reaches the model, so the browser's Web Speech API transcribes the take and the words are the turn. That excludes Firefox, and Chrome's recogniser sends the audio to Google. Two dependencies added (`react-markdown` + `remark-gfm`, `@rive-app/canvas` pinned exact). |
 | _(next)_ | | | |

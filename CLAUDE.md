@@ -16,6 +16,29 @@ a bug** — that rule is why that section exists.
 
 ## Things that will bite you
 
+**`app/pbot.css` and `public/pbot/` are generated — never edit them.** They come
+from the sibling `pandai.question.uiux` checkout via `npm run design:sync`
+(`scripts/pbot-design/sync.mjs`), and the next sync overwrites any hand edit.
+Adapt the source to this app in `app/pbot-host.css`; change what is extracted in
+`sync.mjs`. A state the source renders that `classes.json` has never seen gets
+no CSS — re-run `collect-classes.mjs` against the running source app first.
+
+**The components emit the source's markup class for class.** That is the only
+reason the extracted CSS applies. Rename or re-nest a `pbot-*`, `btn*` or
+`icon-btn*` element and it silently loses its styles; there is no build error.
+`components/pbot/ds.tsx` mirrors `<x-btn>` / `<x-icon-btn>` — the `__face` span
+is what switches the stylesheet into push-button mode.
+
+**`@rive-app/canvas` is pinned exact, and the pin is load-bearing.** Its
+`rive.wasm` is copied into `public/pbot/rive/` (self-hosted, not the unpkg
+default) and must be the same build as the JS. Upgrade = bump the version,
+`npm install`, `npm run design:sync`, commit all three.
+
+**Markdown renders as React elements, never HTML.** Do not add `rehype-raw`,
+`dangerouslySetInnerHTML`, or the source's `md()` regex renderer — that one
+escapes `& < >` but not `"`, so a link in model output can break out of its
+`href`. Model output is the injection surface.
+
 **`lib/agent.ts` is the single source of truth for a model turn.** Both the chat
 route and the eval suite call `runTurn()`. Never inline model parameters into
 `app/api/chat/route.ts` or `evals/run.ts` — evals that test a copy of the config
@@ -77,10 +100,12 @@ resolves to `undefined` client-side.
 prompt's opening line, update the sentinel or the output leak check goes blind.
 `npm run eval:offline` covers this.
 
-**`pbot-open` is a public contract.** Host apps open the panel with
-`window.dispatchEvent(new CustomEvent("pbot-open"))`. Don't replace it with
-props or context — the event is why the panel drops into an existing app
-without touching that app's component tree. The panel is no longer the product
+**`pbot-open` is a public contract, and `pbot-closed` is its reply.** Host apps
+open the panel with `window.dispatchEvent(new CustomEvent("pbot-open"))`, and
+the panel fires `pbot-closed` on `window` when it shuts (the floating PBot
+listens for it). Don't replace either with props or context — the events are
+why the panel drops into an existing app without touching that app's component
+tree. The panel is no longer the product
 (the web layout is), but it is still routed at `/embed` precisely so this
 contract stays exercised instead of rotting as unrendered code.
 
@@ -127,9 +152,16 @@ list.** They are generated and gitignored, but ESLint's flat config does not
 read `.gitignore`. Without the ignores, `npm run check` reports ~15,000 problems
 from minified vendor bundles and the pre-commit gate becomes useless noise.
 
-**Don't persist images.** `lib/history.ts` strips attachments before writing to
-localStorage on purpose: base64 images against a ~5MB quota would evict the
-whole history after two screenshots.
+**Don't persist images or voice clips.** `lib/history.ts` strips attachments
+before writing to localStorage on purpose: base64 images against a ~5MB quota
+would evict the whole history after two screenshots. A voice note keeps its
+waveform and transcript; its `blob:` URL dies with the tab and is dropped.
+`history-persistence` in the offline evals guards both.
+
+**History is an external store.** Read it through `useSyncExternalStore` (see
+`usePBot`); every write in `lib/history.ts` must call `notify()`. Refreshing it
+from an effect is what React 19's lint rejected, and a write that forgets to
+notify leaves the web rail stale.
 
 **Don't reintroduce `useState` + `useEffect` for the SSR mount guard** in
 `PBotPanel`. React 19's lint flags it as a cascading render; `useIsHydrated`

@@ -73,21 +73,23 @@ The single most important table in this document. Everything else assumes it.
 | Capability | State | Evidence |
 | --- | --- | --- |
 | Streaming chat with persona | Built | Code complete; typecheck, lint, build pass |
-| Slide-in panel UI | Built | Renders; verified against a running server |
+| Web layout + slide-in panel UI | Built | The source's design, synced 2026-10-02 (§6.7); seven flows scripted in a browser with the model stubbed |
 | Multi-turn memory | Built | Full history replayed each turn |
 | Conversation persistence | Built | localStorage; 6 offline assertions pass |
-| Tool use (`get_current_time`) | Built | Loop implemented; **never executed against the real API** |
+| Tool use (`get_current_time`) | Built | Real streamed turn with the tool round-trip, 2026-09-02, via OpenRouter |
 | Image input | Built | Validation verified; **never executed against the real API** |
 | Guardrails | Built | 7/7 offline evals pass |
 | Rate limiting | Built | In-memory, per-instance |
 | Structured logging | Built | Log lines confirmed emitted |
 | Feedback endpoint | Built | 200/400 paths verified |
-| Eval suite (offline, 7 cases) | Built | **7/7 pass**, 2026-08-17 |
-| Eval suite (model, 12 cases) | Built | **NEVER RUN** — no API key has ever been used |
+| Eval suite (offline, 8 cases) | Built | **8/8 pass**, 2026-10-02 |
+| Eval suite (model) | Built | **18/19**, 2026-09-02, via OpenRouter — the failure is real; see RELIABILITY.md |
 | **Deployment** | **NOT DONE** | No live URL exists |
 | Authentication | **Not built** | Deliberate — see §10 |
 | Shared-store rate limiting | **Not built** | Deliberate — see §9 |
-| Markdown rendering | **Not built** | Deliberate — see §10 |
+| Markdown rendering | Built 2026-10-02 | React elements via `react-markdown`; raw HTML dropped, unsafe link schemes stripped |
+| History rename (in-row menu, top bar, panel chip) | Built 2026-10-02 | Scripted browser run; blank rename refused (offline eval) |
+| Voice notes | Built 2026-10-02 | Web Speech transcription → text turn. Scripted with a stubbed recogniser only; **no real voice note yet** |
 | RAG / knowledge grounding | **Not built** | Out of scope by design |
 
 **Read this literally:** the system has never spoken to Claude. Every code path
@@ -153,7 +155,10 @@ Bounded by `MAX_TOOL_ITERATIONS` (default 4) so a pathological turn cannot spin.
 | `lib/limits.ts` | Shared client/server limits | — |
 | `lib/log.ts` | Structured logging | — |
 | `lib/types.ts` | Wire contract | — |
-| `components/pbot/usePBot.ts` | Panel state machine + stream reader | history, types |
+| `components/pbot/usePBot.ts` | State machine + stream reader, both surfaces | history, types |
+| `components/pbot/useVoice.ts` | Recorder, waveform, Web Speech transcription, playback | types |
+| `components/pbot/ds.tsx` | The source DS's button/icon markup, so its CSS applies | — |
+| `app/pbot.css` | **Generated** — the source design system's rules | `scripts/pbot-design/sync.mjs` |
 
 **The critical invariant:** `lib/agent.ts` is called by both `app/api/chat/route.ts`
 and `evals/run.ts`. Never inline model parameters at either call site.
@@ -296,9 +301,11 @@ Closed by Esc, the scrim, or the X button.
 
 - A `<body>` to portal into.
 - That it may set `document.body.style.overflow` while open (restored on close).
-- Tailwind v4 present, **or** the `.pbot-*` CSS block ported (§6.4). The panel's
-  own styling is plain CSS with no Tailwind dependency; only the `/embed` host
-  stand-in uses Tailwind utilities.
+- `app/pbot.css` + `app/pbot-host.css` loaded (§6.5), the `public/pbot/`
+  assets served at `/pbot/`, and a `--font-poppins` variable (or Poppins
+  installed). The panel's own styling is plain CSS with no Tailwind dependency;
+  only the `/embed` host stand-in uses Tailwind utilities.
+- `btn-gamefeel` on `<html>` — the source DS stages its button motion tokens there.
 - `/api/chat` and `/api/feedback` reachable at the same origin. To point
   elsewhere, change the two `fetch` calls in `usePBot.ts`.
 
@@ -311,7 +318,7 @@ Every file, verbatim, as generated from the working tree.
 ### 6.1 Project files
 
 #### `package.json`  
-_44 lines_
+_48 lines_
 
 ```json
 {
@@ -332,6 +339,7 @@ _44 lines_
     "eval:offline": "tsx evals/run.ts --offline",
     "check": "npm run typecheck && npm run lint && npm run eval:offline",
     "export:refresh": "node scripts/inline-export.mjs",
+    "design:sync": "node scripts/pbot-design/sync.mjs",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",
@@ -339,9 +347,12 @@ _44 lines_
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
+    "@rive-app/canvas": "2.38.5",
     "next": "16.3.1",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@opennextjs/cloudflare": "^1.20.2",
@@ -529,7 +540,7 @@ ANTHROPIC_API_KEY=
 ### 6.2 Library — the engine
 
 #### `lib/types.ts`  
-_75 lines_
+_90 lines_
 
 ```ts
 /** Wire types shared between the chat route and the browser client. */
@@ -554,6 +565,19 @@ export interface Attachment {
   name?: string;
 }
 
+/**
+ * A spoken user turn, as the bubble draws it. The words themselves travel as
+ * the message's `content` — that transcript is all the model ever sees; this
+ * is only the waveform, the length, and (in memory) a clip to play back.
+ */
+export interface VoiceNote {
+  seconds: number;
+  /** Bar heights in px, already resampled to what the bubble draws. */
+  bars: number[];
+  /** A blob: URL. In-memory only — dropped before persisting, like images. */
+  url?: string;
+}
+
 /** A single conversation turn as the client stores and sends it. */
 export interface ChatMessage {
   id: string;
@@ -563,6 +587,8 @@ export interface ChatMessage {
   image?: Attachment;
   /** Set on rehydrated history where an image was dropped to save quota. */
   imagePlaceholder?: boolean;
+  /** Present when the user spoke this turn instead of typing it. Client-only. */
+  voice?: VoiceNote;
 }
 
 /** What the client POSTs to /api/chat. */
@@ -1378,7 +1404,7 @@ export function newRequestId(): string {
 ```
 
 #### `lib/history.ts`  
-_142 lines_
+_217 lines_
 
 ```ts
 import type { ChatMessage } from "./types";
@@ -1421,10 +1447,64 @@ function isBrowser(): boolean {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
+/*
+ * The list is an external store, read with `useSyncExternalStore` (see
+ * `useConversations` in usePBot). Writes below notify this tab's subscribers;
+ * the `storage` event covers other tabs, so `/` and `/embed` open side by side
+ * stay in step. The snapshot is cached against the raw string, because the
+ * store contract requires the same array back until something actually changed.
+ */
+const listeners = new Set<() => void>();
+const EMPTY: StoredConversation[] = [];
+let cachedRaw: string | null = null;
+let cached: StoredConversation[] = EMPTY;
+
+function notify() {
+  listeners.forEach((l) => l());
+}
+
+export function subscribeConversations(listener: () => void): () => void {
+  listeners.add(listener);
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === STORAGE_KEY || e.key === null) listener();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    listeners.delete(listener);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+export function conversationsSnapshot(): StoredConversation[] {
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return EMPTY;
+  }
+  if (raw !== cachedRaw) {
+    cachedRaw = raw;
+    cached = parseConversations(raw);
+  }
+  return cached;
+}
+
+/** The server has no history; neither does the hydration pass. */
+export function conversationsServerSnapshot(): StoredConversation[] {
+  return EMPTY;
+}
+
 export function loadConversations(): StoredConversation[] {
   if (!isBrowser()) return [];
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    return parseConversations(window.localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return [];
+  }
+}
+
+function parseConversations(raw: string | null): StoredConversation[] {
+  try {
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -1443,12 +1523,14 @@ export function saveConversation(conversation: StoredConversation): void {
   try {
     const stripped: StoredConversation = {
       ...conversation,
-      messages: conversation.messages.map(({ id, role, content, image }) => ({
+      messages: conversation.messages.map(({ id, role, content, image, imagePlaceholder, voice }) => ({
         id,
         role,
         content,
         // Keep the fact that an image was sent; drop the payload.
-        ...(image ? { imagePlaceholder: true } : {}),
+        ...(image || imagePlaceholder ? { imagePlaceholder: true } : {}),
+        // Keep a voice note's shape and length; its blob: URL dies with the tab.
+        ...(voice ? { voice: { seconds: voice.seconds, bars: voice.bars } } : {}),
       })) as ChatMessage[],
     };
 
@@ -1458,9 +1540,27 @@ export function saveConversation(conversation: StoredConversation): void {
       .slice(0, MAX_CONVERSATIONS);
 
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    notify();
   } catch {
     // Quota exceeded or storage disabled (private mode, blocked cookies).
     // History is a convenience; losing it must never break the chat.
+  }
+}
+
+/** Renames one saved conversation in place. A blank name is refused. */
+export function renameConversation(id: string, title: string): boolean {
+  const name = title.replace(/\s+/g, " ").trim();
+  if (!isBrowser() || !name) return false;
+  try {
+    const all = loadConversations();
+    const hit = all.find((c) => c.id === id);
+    if (!hit) return false;
+    hit.title = name;
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+    notify();
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1469,6 +1569,7 @@ export function deleteConversation(id: string): void {
   try {
     const next = loadConversations().filter((c) => c.id !== id);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    notify();
   } catch {
     /* ignore */
   }
@@ -1821,22 +1922,24 @@ export async function POST(request: Request): Promise<Response> {
 ### 6.4 UI — the panel
 
 #### `components/pbot/usePBot.ts`  
-_417 lines_
+_439 lines_
 
 ```ts
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
+  conversationsServerSnapshot,
+  conversationsSnapshot,
   deleteConversation,
   deriveTitle,
   groupByDate,
-  loadConversations,
+  renameConversation,
   saveConversation,
-  type HistoryGroup,
+  subscribeConversations,
   type StoredConversation,
 } from "@/lib/history";
-import type { Attachment, ChatMessage, StreamEvent, TurnUsage } from "@/lib/types";
+import type { Attachment, ChatMessage, StreamEvent, TurnUsage, VoiceNote } from "@/lib/types";
 
 /**
  * The AskPBot state machine.
@@ -1870,8 +1973,9 @@ export interface TurnStats {
   truncated: boolean;
 }
 
+// Markdown since replies render it: the source's own greeting bolds the name.
 const GREETING =
-  "Hi! I'm PBot, your AI study buddy — you can ask me anything below. 🐼";
+  "Hi! I'm **PBot**, your AI study buddy — you can ask me anything below. 🐼";
 
 function newId(): string {
   return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
@@ -1879,6 +1983,10 @@ function newId(): string {
 
 function greetingMessage(): ChatMessage {
   return { id: newId(), role: "assistant", content: GREETING };
+}
+
+function userTurn(content: string, image?: Attachment, voice?: VoiceNote): ChatMessage {
+  return { id: newId(), role: "user", content, ...(image ? { image } : {}), ...(voice ? { voice } : {}) };
 }
 
 /**
@@ -1898,13 +2006,16 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
   const [status, setStatus] = useState<PBotStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [lastTurn, setLastTurn] = useState<TurnStats | null>(null);
-  // The panel loads history when it opens, so [] is correct until then. The
-  // page surface shows it on first paint, so it is seeded here rather than from
-  // an effect — `loadConversations` returns [] off the browser, so this is safe
-  // during SSR, and `PBotWeb` gates the render on hydration so the two agree.
-  const [history, setHistory] = useState<HistoryGroup[]>(() =>
-    mode === "page" ? groupByDate(loadConversations()) : [],
+  // Saved chats are localStorage, an external store: every save, rename and
+  // delete notifies, so the web rail and the panel's home are always current
+  // without anyone remembering to refresh them. Empty on the server and during
+  // hydration; `PBotWeb` gates the rail on hydration so the two agree.
+  const conversations = useSyncExternalStore(
+    subscribeConversations,
+    conversationsSnapshot,
+    conversationsServerSnapshot,
   );
+  const history = useMemo(() => groupByDate(conversations), [conversations]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [ratedIds, setRatedIds] = useState<Set<string>>(new Set());
 
@@ -1912,16 +2023,9 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
   const createdAtRef = useRef<number>(Date.now());
   const isStreaming = status !== "idle";
 
-  const refreshHistory = useCallback(() => {
-    setHistory(groupByDate(loadConversations()));
-  }, []);
-
   // --- panel open/close ----------------------------------------------------
 
-  const show = useCallback(() => {
-    setIsOpen(true);
-    refreshHistory();
-  }, [refreshHistory]);
+  const show = useCallback(() => setIsOpen(true), []);
 
   const hide = useCallback(() => setIsOpen(false), []);
 
@@ -1982,13 +2086,11 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
     abortRef.current?.abort();
     setStatus("idle");
     setView("home");
-    refreshHistory();
-  }, [refreshHistory]);
+  }, []);
 
   const removeConversation = useCallback(
     (id: string) => {
       deleteConversation(id);
-      refreshHistory();
       // If the open conversation was the one deleted, don't leave it stranded.
       if (id === conversationId) {
         setView("home");
@@ -1996,7 +2098,7 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
         setMessages([]);
       }
     },
-    [conversationId, refreshHistory],
+    [conversationId],
   );
 
   // Persist after every settled turn. Skipped while streaming so a partial
@@ -2013,6 +2115,27 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
       messages,
     });
   }, [conversationId, isStreaming, messages, title]);
+
+  /**
+   * Renames a conversation from the history row or the chat's own title.
+   * Returns false when refused (blank, or unchanged) so an inline editor knows
+   * to put the old name back.
+   */
+  const rename = useCallback(
+    (id: string, next: string) => {
+      const name = next.replace(/\s+/g, " ").trim();
+      if (!name) return false;
+      const isCurrent = id === conversationId;
+      if (isCurrent && name === title) return false;
+      // A chat with no question yet is not saved, so there is no row to rename —
+      // the save effect writes this title when the first turn settles.
+      const saved = renameConversation(id, name);
+      if (!saved && !isCurrent) return false;
+      if (isCurrent) setTitle(name);
+      return true;
+    },
+    [conversationId, title],
+  );
 
   // --- the turn ------------------------------------------------------------
 
@@ -2122,18 +2245,16 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
   }, []);
 
   const send = useCallback(
-    (text: string, image?: Attachment) => {
+    (text: string, image?: Attachment, voice?: VoiceNote) => {
       const trimmed = text.trim();
       if ((!trimmed && !image) || isStreaming) return;
-      const userMessage: ChatMessage = {
-        id: newId(),
-        role: "user",
-        content: trimmed,
-        ...(image ? { image } : {}),
-      };
-      void runTurn([...messages, userMessage]);
+      const outbound = [...messages, userTurn(trimmed, image, voice)];
+      // The first question names the chat — the same rule the save uses, applied
+      // here so the open chat's title shows it immediately, not after a reload.
+      if (title === "New Chat") setTitle(deriveTitle(outbound));
+      void runTurn(outbound);
     },
-    [isStreaming, messages, runTurn],
+    [isStreaming, messages, runTurn, title],
   );
 
   /**
@@ -2146,17 +2267,18 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
    * turn here sidesteps the stale closure entirely.
    */
   const startChatWith = useCallback(
-    (text: string) => {
+    (text: string, image?: Attachment, voice?: VoiceNote) => {
       const trimmed = text.trim();
-      if (!trimmed || isStreaming) return;
+      if ((!trimmed && !image) || isStreaming) return;
       abortRef.current?.abort();
       createdAtRef.current = Date.now();
       setConversationId(newId());
-      setTitle("New Chat");
       setError(null);
       setLastTurn(null);
       setView("chat");
-      void runTurn([greetingMessage(), { id: newId(), role: "user", content: trimmed }]);
+      const outbound = [greetingMessage(), userTurn(trimmed, image, voice)];
+      setTitle(deriveTitle(outbound));
+      void runTurn(outbound);
     },
     [isStreaming, runTurn],
   );
@@ -2224,6 +2346,7 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
     openChat,
     history,
     removeConversation,
+    rename,
     // conversation
     messages,
     status,
@@ -2244,122 +2367,229 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
 ```
 
 #### `components/pbot/PBotWeb.tsx`  
-_94 lines_
+_195 lines_
 
 ```tsx
 "use client";
 
-import { IconChevronRight } from "./icons";
+import type { Attachment, VoiceNote } from "@/lib/types";
+import { useButtonBounce, useTypewriter } from "./behaviors";
+import { Btn } from "./ds";
 import { PBotChat } from "./PBotChat";
+import { PBotComposer } from "./PBotComposer";
 import { PBotHistory } from "./PBotHistory";
-import { PBotPodium } from "./PBotPodium";
-import { PBotSuggestions } from "./PBotSuggestions";
+import { PBotRive } from "./PBotRive";
+import { PBotHeroPrompts } from "./PBotSuggestions";
+import { PBotTitle } from "./PBotTitle";
 import { useIsHydrated } from "./useIsHydrated";
 import { usePBot } from "./usePBot";
 
+const HERO_TITLE = "What shall we learn today?";
+const HERO_SUB = "Pick a suggestion below, or type your own question.";
+
 /**
- * The two-column web layout: a persistent sidebar beside a main area that shows
- * either the hero or the open conversation.
+ * The product — the source's lab/askpbot web view (DS 5734:* "AskPBot / Web"):
+ * one rounded deep-space field holding a rail (the Ask PBot card, New Chat, the
+ * saved chats) beside a main pane with one top bar over either the idle hero or
+ * the conversation.
  *
- * This is the surface the product ships as. It differs from `PBotPanel` in one
- * structural way rather than many cosmetic ones: history is always on screen in
- * the sidebar instead of being a view you navigate back to, so `view` here
- * chooses only what fills the main column. Everything below the layout — the
- * state machine, the stream reader, the turn rendering — is the same code the
- * panel uses.
+ * It differs from `PBotPanel` in one structural way rather than many cosmetic
+ * ones: history is always on screen in the rail, so `view` chooses only what
+ * fills the main pane. Below the layout, every piece — state machine, stream
+ * reader, turns, composer, history — is the code the panel uses.
  */
 export function PBotWeb() {
   const pbot = usePBot({ mode: "page" });
   // History comes from localStorage, which the server cannot see. Rendering it
   // only after hydration keeps the first client paint identical to the server's.
   const hydrated = useIsHydrated();
+  useButtonBounce();
+  const inChat = pbot.view === "chat";
 
   return (
-    <div className="pbot-web">
-      <aside className="pbot-web__side">
-        <div className="pbot-web__brand">
-          <span className="pbot-web__brand-mark" aria-hidden="true">
-            🐼
-          </span>
-          <span className="pbot-web__brand-name">Ask PBot</span>
+    <div className="pbot-page">
+      <div className="pbot-web-shell">
+        <div className="pbot-web is-ask">
+          {/* The scene's three spheres and its sky (6191:22462 · 5763:87648).
+              First in the DOM so they paint under the rail and the pane. */}
+          <span className="pbot-orb pbot-orb--web-lg" aria-hidden="true" />
+          <span className="pbot-orb pbot-orb--web-md" aria-hidden="true" />
+          <span className="pbot-orb pbot-orb--web-sm" aria-hidden="true" />
+          <div className="pbot-web__sky" aria-hidden="true">
+            {/* eslint-disable @next/next/no-img-element */}
+            <img className="pbot-web__sky-glow" src="/pbot/askpbot/web-hero-glow.svg" alt="" />
+            <img className="pbot-orbit__spark pbot-web__spark pbot-web__spark--a" src="/pbot/askpbot/sparkle.svg" alt="" width={20} height={20} />
+            <img className="pbot-orbit__spark pbot-web__spark pbot-web__spark--b" src="/pbot/askpbot/sparkle.svg" alt="" width={16} height={16} />
+            <img className="pbot-orbit__spark pbot-web__spark pbot-web__spark--c" src="/pbot/askpbot/sparkle.svg" alt="" width={14} height={14} />
+            {/* eslint-enable @next/next/no-img-element */}
+          </div>
+
+          <aside className="pbot-web__side" aria-label="Your chats">
+            {/* The source's tab deck, with Math Drill gone: one card, the brand. */}
+            <div className="pbot-deck pbot-deck--solo pbot-web__deck">
+              <span className="pbot-deck__card pbot-deck__card--ask is-front">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src="/pbot/askpbot/tab-ask-active.png" alt="Ask PBot" />
+              </span>
+            </div>
+
+            <div className="pbot-web__side-body">
+              <Btn variant="primary" size="l" block iconEnd="chevron-btn-m" className="pbot-web__newchat" onClick={pbot.newChat}>
+                Start a New Chat
+              </Btn>
+              {hydrated && (
+                <PBotHistory
+                  history={pbot.history}
+                  activeId={inChat ? pbot.conversationId : null}
+                  onOpenChat={pbot.openChat}
+                  onRename={pbot.rename}
+                  onDelete={pbot.removeConversation}
+                />
+              )}
+            </div>
+          </aside>
+
+          <main className={`pbot-web__main ${inChat ? "is-chat" : ""}`}>
+            <span className="pbot-panel__glow pbot-web__glow" aria-hidden="true" />
+
+            {/* DS top bar (5706:45980) — ONE bar for every screen: Back, the open
+                chat's name centred, and the empty brand slot that balances Back. */}
+            <div className="pbot-topbar pbot-topbar--space">
+              <div className="pbot-topbar__left">
+                {inChat && (
+                  <Btn variant="secondary" size="m" iconStart="chevron-left" onClick={pbot.back}>
+                    Back
+                  </Btn>
+                )}
+              </div>
+              <div className="pbot-topbar__mid">
+                {inChat && pbot.conversationId ? (
+                  <PBotTitle
+                    className="pbot-topbar__title"
+                    title={pbot.title}
+                    onRename={(next) => pbot.rename(pbot.conversationId!, next)}
+                  />
+                ) : (
+                  <h1 className="pbot-topbar__title">Ask PBot</h1>
+                )}
+              </div>
+              <span className="pbot-topbar__brand" aria-hidden="true" />
+            </div>
+
+            <div className="pbot-web__ask">
+              {inChat ? (
+                <PBotChat
+                  layout="web"
+                  title={pbot.title}
+                  messages={pbot.messages}
+                  status={pbot.status}
+                  isStreaming={pbot.isStreaming}
+                  error={pbot.error}
+                  lastTurn={pbot.lastTurn}
+                  copiedId={pbot.copiedId}
+                  ratedIds={pbot.ratedIds}
+                  onBack={pbot.back}
+                  onRename={(next) => pbot.rename(pbot.conversationId!, next)}
+                  onSend={pbot.send}
+                  onStop={pbot.stop}
+                  onRegenerate={pbot.regenerate}
+                  onCopy={pbot.copy}
+                  onRate={pbot.rate}
+                />
+              ) : (
+                <PBotHero onStart={pbot.startChatWith} isStreaming={pbot.isStreaming} />
+              )}
+            </div>
+          </main>
         </div>
+      </div>
+    </div>
+  );
+}
 
-        <button className="pbot-newchat" type="button" onClick={pbot.newChat}>
-          <span>Start New Chat</span>
-          <span className="pbot-newchat__chev">
-            <IconChevronRight size={16} />
-          </span>
-        </button>
+/**
+ * The idle hero (DS 5487:102463): PBot in his halo, the question typed in, four
+ * prompts and a composer. Nothing here holds a conversation, so every way out —
+ * a prompt, a typed question, a voice note, an image — starts one with that
+ * first turn already in it.
+ *
+ * The upper half scrolls on its own and the composer is pinned: in a short
+ * window the source measured the composer falling outside the card otherwise.
+ */
+function PBotHero({
+  onStart,
+  isStreaming,
+}: {
+  onStart: (text: string, image?: Attachment, voice?: VoiceNote) => void;
+  isStreaming: boolean;
+}) {
+  const title = useTypewriter(HERO_TITLE);
+  // Clears the title: ~26 characters at the 42ms average plus the lead-in.
+  const sub = useTypewriter(HERO_SUB, { delay: 1600 });
 
-        <div className="pbot-web__hist">
-          {hydrated && (
-            <PBotHistory
-              history={pbot.history}
-              activeId={pbot.conversationId}
-              onOpenChat={pbot.openChat}
-              onDelete={pbot.removeConversation}
-              emptyText="No conversations yet — start a new chat above."
-            />
-          )}
-        </div>
-      </aside>
-
-      <main className="pbot-web__main">
-        <span className="pbot-panel__glow pbot-web__glow" aria-hidden="true" />
-
-        {pbot.view === "home" ? (
-          <div className="pbot-web__hero">
-            <PBotPodium />
-            <h1 className="pbot-web__hero-title">Hi, I&apos;m PBot 🐼</h1>
-            <p className="pbot-web__hero-sub">
-              Your AI study buddy. Ask me anything, or pick a prompt to get started.
+  return (
+    <div className="pbot-web__hero">
+      <div className="pbot-web__column">
+        <div className="pbot-web__scroll">
+          <div className="pbot-web__intro">
+            <div className="pbot-web__orbit" aria-hidden="true">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="pbot-web__halo" src="/pbot/askpbot/web-hero-halo.svg" alt="" />
+              <span className="home-pbot__diver">
+                <PBotRive size={460} className="home-pbot__canvas" />
+              </span>
+              {/* eslint-disable @next/next/no-img-element */}
+              <img className="pbot-orbit__spark pbot-web__spark pbot-web__spark--d" src="/pbot/askpbot/web-hero-spark.svg" alt="" width={31} height={31} />
+              <img className="pbot-orbit__spark pbot-web__spark pbot-web__spark--e" src="/pbot/askpbot/web-hero-spark-gold.svg" alt="" width={17} height={17} />
+              {/* eslint-enable @next/next/no-img-element */}
+            </div>
+            <h2 className={`pbot-web__hero-title ${title.typing ? "is-typing" : ""}`}>
+              <span className="sr-only">{HERO_TITLE}</span>
+              <span aria-hidden="true">{title.shown}</span>
+            </h2>
+            <p className={`pbot-web__hero-sub ${sub.typing ? "is-typing" : ""}`}>
+              <span className="sr-only">{HERO_SUB}</span>
+              <span aria-hidden="true">{sub.shown}</span>
             </p>
-            {/* A chip here opens the conversation and asks in one gesture. */}
-            <PBotSuggestions onPick={pbot.startChatWith} className="pbot-web__prompts" />
           </div>
-        ) : (
-          <div className="pbot-web__conv">
-            <PBotChat
-              title={pbot.title}
-              messages={pbot.messages}
-              status={pbot.status}
-              isStreaming={pbot.isStreaming}
-              error={pbot.error}
-              lastTurn={pbot.lastTurn}
-              copiedId={pbot.copiedId}
-              ratedIds={pbot.ratedIds}
-              onBack={pbot.back}
-              onSend={pbot.send}
-              onStop={pbot.stop}
-              onRegenerate={pbot.regenerate}
-              onCopy={pbot.copy}
-              onRate={pbot.rate}
-            />
-          </div>
-        )}
-      </main>
+          <PBotHeroPrompts onPick={(p) => onStart(p)} />
+        </div>
+
+        <PBotComposer
+          variant="hero"
+          onSend={onStart}
+          isStreaming={isStreaming}
+          footer={<p className="pbot-disclaimer">Pbot may make mistakes, please double-check the answers.</p>}
+        />
+      </div>
     </div>
   );
 }
 ```
 
 #### `components/pbot/PBotHistory.tsx`  
-_88 lines_
+_181 lines_
 
 ```tsx
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { HistoryGroup, StoredConversation } from "@/lib/history";
-import { IconMoreVertical, IconTrash } from "./icons";
+import { useScrollFade } from "./behaviors";
+import { Btn, Icon, IconBtn } from "./ds";
 
 /**
- * The saved-conversation list, grouped by day.
+ * Saved conversations — the source's `_askpbot-history`, shared by the panel's
+ * home and the web rail exactly as the source shares it.
  *
- * Shared by both surfaces: it is the whole of the panel's home view and the
- * lower half of the web layout's sidebar. Only the container differs, so this
- * renders groups and rows and lets each parent supply its own box — the kebab
- * menu logic exists once rather than twice.
+ * Empty, it is the DS empty state (3274:127548). Otherwise a card of day-grouped
+ * rows, each with a three-dot trigger that flips the ROW ITSELF (DS 4828:88679)
+ * to Back / Rename / Delete instead of opening a floating menu, so the list
+ * never shifts. Rename (4828:88757) is the composer's own fused field; Delete
+ * (4828:88834) asks in the row, naming the chat. Back steps out of rename or
+ * delete to the menu first, then closes it.
+ *
+ * Native overflow scrolling, not the source's ds-scroll pill — see SCOPE.md.
  */
 
 interface PBotHistoryProps {
@@ -2367,90 +2597,177 @@ interface PBotHistoryProps {
   /** Highlights the conversation currently open in the main area. */
   activeId?: string | null;
   onOpenChat: (conversation: StoredConversation) => void;
+  onRename: (id: string, title: string) => boolean;
   onDelete: (id: string) => void;
-  emptyText?: string;
 }
 
-export function PBotHistory({
-  history,
-  activeId = null,
-  onOpenChat,
-  onDelete,
-  emptyText = "Your chats will appear here once you start one. 🐼",
-}: PBotHistoryProps) {
-  // Which row's kebab menu is open. Only ever one at a time.
-  const [menuFor, setMenuFor] = useState<string | null>(null);
+type Mode = "menu" | "rename" | "delete";
+
+export function PBotHistory({ history, activeId = null, onOpenChat, onRename, onDelete }: PBotHistoryProps) {
+  const [acting, setActing] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>("menu");
+  const [draft, setDraft] = useState("");
+  const boxRef = useRef<HTMLDivElement>(null);
+  useScrollFade(boxRef);
 
   if (history.length === 0) {
-    return <p className="pbot-history__empty">{emptyText}</p>;
+    return (
+      <div className="pbot-empty">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img className="pbot-empty__art" src="/pbot/askpbot/empty-state.png" alt="" width={108} height={108} />
+        <p className="pbot-empty__text">No conversations yet — start a new chat above.</p>
+      </div>
+    );
   }
 
-  return (
-    <>
-      {history.map((group) => (
-        <div className="pbot-history__group" key={group.label}>
-          <p className="pbot-history__label">{group.label}</p>
-          {group.items.map((item) => (
-            <div
-              className={`pbot-history__item ${item.id === activeId ? "is-active" : ""}`}
-              key={item.id}
-            >
-              <button
-                className="pbot-history__open"
-                type="button"
-                onClick={() => onOpenChat(item)}
-                title={item.title}
-              >
-                {item.title}
-              </button>
+  const close = () => {
+    setActing(null);
+    setMode("menu");
+  };
+  const back = () => (mode === "menu" ? close() : setMode("menu"));
 
-              {menuFor === item.id ? (
-                <button
-                  className="pbot-history__menu is-danger"
-                  type="button"
-                  onClick={() => {
-                    onDelete(item.id);
-                    setMenuFor(null);
-                  }}
-                  onBlur={() => setMenuFor(null)}
-                  aria-label={`Delete "${item.title}"`}
-                  autoFocus
-                >
-                  <IconTrash size={18} />
-                </button>
-              ) : (
-                <button
-                  className="pbot-history__menu"
-                  type="button"
-                  onClick={() => setMenuFor(item.id)}
-                  aria-label={`Options for "${item.title}"`}
-                >
-                  <IconMoreVertical size={18} />
-                </button>
-              )}
+  return (
+    <div className="pbot-history">
+      <div className="pbot-history__box" ref={boxRef}>
+        <div className="pbot-history__inner">
+          {history.map((group) => (
+            <div className="pbot-history__group" key={group.label}>
+              <p className="pbot-history__label">{group.label}</p>
+              {group.items.map((item) => {
+                const isActing = acting === item.id;
+                return (
+                  <div
+                    className={`pbot-history__item ${isActing ? "is-acting" : ""} ${item.id === activeId ? "is-active" : ""}`}
+                    key={item.id}
+                  >
+                    {!isActing ? (
+                      <>
+                        <button
+                          className="pbot-history__open"
+                          type="button"
+                          onClick={() => onOpenChat(item)}
+                          title={item.title}
+                          aria-current={item.id === activeId ? "true" : undefined}
+                        >
+                          {item.title}
+                        </button>
+                        <button
+                          className="pbot-history__more"
+                          type="button"
+                          onClick={() => {
+                            setActing(item.id);
+                            setMode("menu");
+                          }}
+                          aria-label={`Options for "${item.title}"`}
+                        >
+                          <Icon name="more-vertical" size={20} />
+                        </button>
+                      </>
+                    ) : (
+                      <div className="pbot-history__acts">
+                        <IconBtn variant="secondary" size="m" icon="chevron-left" onClick={back} aria-label="Back" />
+                        {mode === "menu" && (
+                          <div className="pbot-history__pair">
+                            <Btn
+                              variant="secondary"
+                              size="m"
+                              autoFocus
+                              onClick={() => {
+                                setDraft(item.title);
+                                setMode("rename");
+                              }}
+                            >
+                              Rename
+                            </Btn>
+                            <Btn variant="danger" size="m" onClick={() => setMode("delete")}>
+                              Delete
+                            </Btn>
+                          </div>
+                        )}
+                        {mode === "rename" && (
+                          <form
+                            className="pbot-compose__group pbot-rename"
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              if (onRename(item.id, draft) || draft.trim() === item.title) close();
+                            }}
+                          >
+                            <div className="pbot-compose__pill">
+                              <input
+                                type="text"
+                                className="pbot-compose__field pbot-compose__field--input pbot-rename__field"
+                                value={draft}
+                                onChange={(e) => setDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Escape") {
+                                    e.stopPropagation();
+                                    close();
+                                  }
+                                }}
+                                autoFocus
+                                onFocus={(e) => e.currentTarget.select()}
+                                aria-label="Chat name"
+                                autoComplete="off"
+                              />
+                            </div>
+                            <IconBtn
+                              className="pbot-compose__send"
+                              variant="primary"
+                              size="m"
+                              icon="edit"
+                              type="submit"
+                              disabled={!draft.trim()}
+                              aria-label="Save name"
+                            />
+                          </form>
+                        )}
+                        {mode === "delete" && (
+                          <div className="pbot-history__confirm">
+                            <p className="pbot-history__ask">
+                              Are you sure you want to delete?{" "}
+                              <span>&ldquo;{item.title}&rdquo;</span>
+                            </p>
+                            <IconBtn
+                              variant="delete"
+                              size="m"
+                              icon="trash-2"
+                              autoFocus
+                              onClick={() => {
+                                onDelete(item.id);
+                                close();
+                              }}
+                              aria-label={`Delete "${item.title}"`}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ))}
         </div>
-      ))}
-    </>
+      </div>
+    </div>
   );
 }
 ```
 
 #### `components/pbot/PBotSuggestions.tsx`  
-_41 lines_
+_64 lines_
 
 ```tsx
 "use client";
 
+import { useId, useState } from "react";
+import { Icon } from "./ds";
+
 /**
- * The starter prompt chips.
- *
- * Ported from the source's `suggestions` array, which the first pass of this
- * port dropped without recording it. They appear in two places, exactly as the
- * source does it: on the hero, where a chip opens a new chat and asks the
- * question in one gesture, and inside a conversation that has no user message
- * yet, where it just fills the turn.
+ * The starter prompts, in their two places, exactly as the source has them: on
+ * the idle hero, where a chip opens a new chat and asks in one gesture; and in
+ * a conversation with no question yet, under a "Suggestion" divider that
+ * collapses the list (DS 5274:96729).
  */
 
 export const PBOT_SUGGESTIONS = [
@@ -2460,56 +2777,48 @@ export const PBOT_SUGGESTIONS = [
   "Help me plan a study timetable",
 ] as const;
 
-interface PBotSuggestionsProps {
-  onPick: (prompt: string) => void;
-  /** `pbot-suggest` stacks (in-chat); `pbot-web__prompts` wraps (hero). */
-  className?: string;
-}
-
-export function PBotSuggestions({ onPick, className = "pbot-suggest" }: PBotSuggestionsProps) {
+export function PBotHeroPrompts({ onPick }: { onPick: (prompt: string) => void }) {
   return (
-    <div className={className}>
+    <div className="pbot-web__prompts">
       {PBOT_SUGGESTIONS.map((prompt) => (
-        <button
-          className="pbot-suggest__chip"
-          type="button"
-          key={prompt}
-          onClick={() => onPick(prompt)}
-        >
+        <button className="pbot-suggest__chip pbot-web__prompt" type="button" key={prompt} onClick={() => onPick(prompt)}>
           {prompt}
         </button>
       ))}
     </div>
   );
 }
-```
 
-#### `components/pbot/PBotPodium.tsx`  
-_25 lines_
+export function PBotSuggestions({ onPick }: { onPick: (prompt: string) => void }) {
+  const [open, setOpen] = useState(true);
+  const listId = useId();
+  const toggleId = useId();
 
-```tsx
-"use client";
-
-/**
- * The hero mascot on its podium.
- *
- * The source stacks three SVGs — `mascot/pbot.svg` standing on
- * `askpbot/podium-stage.svg` on `askpbot/podium.svg`. Those binaries were never
- * supplied, so the mascot is the same emoji placeholder used elsewhere in this
- * port and the base and stage are CSS discs at the source's geometry. The rise
- * on entry is real and lives in `globals.css`.
- *
- * Swap the three spans for <img> tags when the assets land; the geometry and
- * the animation are already correct, so nothing else moves.
- */
-export function PBotPodium() {
   return (
-    <div className="pbot-podium" aria-hidden="true">
-      <span className="pbot-podium__mascot">
-        <span className="pbot-podium__face">🐼</span>
-      </span>
-      <span className="pbot-podium__stage" />
-      <span className="pbot-podium__base" />
+    <div className={`pbot-suggest ${open ? "" : "is-collapsed"}`}>
+      {/* The caption IS the collapse control: a real button, wired to the list. */}
+      <button
+        type="button"
+        className="pbot-suggest__divider"
+        id={toggleId}
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-controls={listId}
+      >
+        <span>
+          <Icon name="chevron-down" size={12} />
+          Suggestion
+        </span>
+      </button>
+      {open && (
+        <div className="pbot-suggest__list" id={listId} role="group" aria-labelledby={toggleId}>
+          {PBOT_SUGGESTIONS.map((prompt) => (
+            <button className="pbot-suggest__chip" type="button" key={prompt} onClick={() => onPick(prompt)}>
+              {prompt}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -2548,33 +2857,35 @@ export function useIsHydrated(): boolean {
 ```
 
 #### `components/pbot/PBotPanel.tsx`  
-_110 lines_
+_142 lines_
 
 ```tsx
 "use client";
 
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import { IconX } from "./icons";
+import { useButtonBounce } from "./behaviors";
+import { Btn, Icon, IconLink } from "./ds";
 import { PBotChat } from "./PBotChat";
-import { PBotHome } from "./PBotHome";
+import { PBotHistory } from "./PBotHistory";
+import { PBotRive } from "./PBotRive";
 import { useIsHydrated } from "./useIsHydrated";
 import { usePBot } from "./usePBot";
 
 /**
- * The right-docked slide-in panel.
+ * The right-docked slide-in panel (DS Screen 1.5, 1049:121840).
  *
- * Portals to <body> — the React equivalent of the source template's
- * `x-teleport="body"` — so the panel's fixed positioning and z-index never get
- * trapped by a transformed or overflow-hidden ancestor in the host page.
+ * Portals to <body> — the React equivalent of the source's `x-teleport="body"` —
+ * so the panel's fixed positioning and z-index never get trapped by a
+ * transformed or overflow-hidden ancestor in the host page.
  *
  * Opened by the `pbot-open` window event (see usePBot), closed by Esc, the
- * scrim, or the X. `side` picks the docked edge, matching the original's
- * `$side` prop.
+ * scrim, or the X. `side` picks the docked edge, matching the source's `$side`.
  */
 export function PBotPanel({ side = "right" }: { side?: "left" | "right" }) {
   const pbot = usePBot();
   const mounted = useIsHydrated();
+  useButtonBounce();
   const closeRef = useRef<HTMLButtonElement>(null);
   const openerRef = useRef<Element | null>(null);
 
@@ -2587,58 +2898,74 @@ export function PBotPanel({ side = "right" }: { side?: "left" | "right" }) {
       const t = window.setTimeout(() => closeRef.current?.focus(), 80);
       return () => window.clearTimeout(t);
     }
-    if (openerRef.current instanceof HTMLElement) {
-      openerRef.current.focus();
+    if (openerRef.current) {
+      // Tell the page — the launcher comes back from its poof on this.
+      window.dispatchEvent(new CustomEvent("pbot-closed"));
+      if (openerRef.current instanceof HTMLElement) openerRef.current.focus();
       openerRef.current = null;
     }
   }, [pbot.isOpen]);
 
   if (!mounted) return null;
+  const inChat = pbot.view === "chat";
 
   return createPortal(
     <>
-      <div
-        className={`pbot-scrim ${pbot.isOpen ? "is-open" : ""}`}
-        onClick={pbot.hide}
-        aria-hidden="true"
-      />
+      <div className={`pbot-scrim ${pbot.isOpen ? "is-open" : ""}`} onClick={pbot.hide} aria-hidden="true" />
 
       <aside
-        className={`pbot-panel ${side === "left" ? "pbot-panel--left" : ""} ${
-          pbot.isOpen ? "is-open" : ""
+        className={`pbot-panel ${side === "left" ? "pbot-panel--left" : ""} ${pbot.isOpen ? "is-open" : ""} ${
+          inChat ? "is-chat" : ""
         }`}
         role="dialog"
         aria-modal="true"
         aria-label="Ask PBot"
         // Kept out of the tab order and off the a11y tree while closed, so the
         // panel's controls aren't reachable behind the page.
-        {...(pbot.isOpen ? {} : { inert: "" as unknown as boolean, "aria-hidden": true })}
+        {...(pbot.isOpen ? {} : { inert: true, "aria-hidden": true })}
       >
+        {/* The scene, back to front (6354:17280 …): wordmark under the two
+            spheres, then the glows. Decoration only. */}
         <span className="pbot-panel__glow" aria-hidden="true" />
+        <span className="pbot-watermark" aria-hidden="true" />
+        <span className="pbot-orb pbot-orb--panel-lg" aria-hidden="true" />
+        <span className="pbot-orb pbot-orb--panel-sm" aria-hidden="true" />
+        <span className="pbot-glow pbot-glow--panel-a" aria-hidden="true" />
+        <span className="pbot-glow pbot-glow--panel-b" aria-hidden="true" />
 
         <header className="pbot-panel__head">
+          {/* Maximize (DS 5977:7774) takes the conversation to the full page. */}
+          <IconLink href="/" icon="maximize-2" className="pbot-panel__max" label="Open Ask PBot full screen" />
           <h2 className="pbot-panel__title">Ask Pbot</h2>
-          <button
-            ref={closeRef}
-            className="pbot-panel__close"
-            type="button"
-            onClick={pbot.hide}
-            aria-label="Close"
-          >
-            <IconX size={20} />
+          <button ref={closeRef} className="pbot-panel__close" type="button" onClick={pbot.hide} aria-label="Close">
+            <Icon name="x" size={20} />
           </button>
         </header>
 
+        {/* Hero (DS 3274:127527): the Ask PBot card, and PBot on his pod. */}
+        <div className="pbot-hero">
+          <div className="pbot-deck pbot-deck--solo">
+            <span className="pbot-deck__card pbot-deck__card--ask is-front">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/pbot/askpbot/tab-ask-active.png" alt="Ask PBot" />
+            </span>
+          </div>
+          <div className="pbot-podium" aria-hidden="true">
+            <span className="pbot-podium__pod">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/pbot/askpbot/mathdrill-pod.png" alt="" />
+            </span>
+            <span className="pbot-podium__mascot">
+              {/* Built only while open: no reason to run a canvas behind a closed panel. */}
+              {pbot.isOpen && <PBotRive size={200} className="pbot-podium__canvas" />}
+            </span>
+          </div>
+        </div>
+
         <div className="pbot-feature">
-          {pbot.view === "home" ? (
-            <PBotHome
-              history={pbot.history}
-              onNewChat={pbot.newChat}
-              onOpenChat={pbot.openChat}
-              onDelete={pbot.removeConversation}
-            />
-          ) : (
+          {inChat ? (
             <PBotChat
+              layout="panel"
               title={pbot.title}
               messages={pbot.messages}
               status={pbot.status}
@@ -2648,12 +2975,26 @@ export function PBotPanel({ side = "right" }: { side?: "left" | "right" }) {
               copiedId={pbot.copiedId}
               ratedIds={pbot.ratedIds}
               onBack={pbot.back}
+              onRename={(next) => pbot.rename(pbot.conversationId!, next)}
               onSend={pbot.send}
               onStop={pbot.stop}
               onRegenerate={pbot.regenerate}
               onCopy={pbot.copy}
               onRate={pbot.rate}
             />
+          ) : (
+            // Home: New Chat, then the saved chats (or the empty state).
+            <div className="pbot-home">
+              <Btn variant="primary" size="l" block iconEnd="chevron-btn-m" onClick={pbot.newChat}>
+                Start a New Chat
+              </Btn>
+              <PBotHistory
+                history={pbot.history}
+                onOpenChat={pbot.openChat}
+                onRename={pbot.rename}
+                onDelete={pbot.removeConversation}
+              />
+            </div>
           )}
         </div>
       </aside>
@@ -2663,61 +3004,23 @@ export function PBotPanel({ side = "right" }: { side?: "left" | "right" }) {
 }
 ```
 
-#### `components/pbot/PBotHome.tsx`  
-_36 lines_
-
-```tsx
-"use client";
-
-import type { HistoryGroup, StoredConversation } from "@/lib/history";
-import { IconChevronRight } from "./icons";
-import { PBotHistory } from "./PBotHistory";
-
-/**
- * The panel's home view: start a new chat, or reopen a saved one.
- *
- * The web layout keeps the same two controls but splits them across its
- * sidebar, so the list itself lives in `PBotHistory` and is shared.
- */
-
-interface PBotHomeProps {
-  history: HistoryGroup[];
-  onNewChat: () => void;
-  onOpenChat: (conversation: StoredConversation) => void;
-  onDelete: (id: string) => void;
-}
-
-export function PBotHome({ history, onNewChat, onOpenChat, onDelete }: PBotHomeProps) {
-  return (
-    <div className="pbot-home">
-      <button className="pbot-newchat" type="button" onClick={onNewChat}>
-        <span>Start New Chat</span>
-        <span className="pbot-newchat__chev">
-          <IconChevronRight size={16} />
-        </span>
-      </button>
-
-      <div className="pbot-history">
-        <PBotHistory history={history} onOpenChat={onOpenChat} onDelete={onDelete} />
-      </div>
-    </div>
-  );
-}
-```
-
 #### `components/pbot/PBotChat.tsx`  
-_139 lines_
+_237 lines_
 
 ```tsx
 "use client";
 
-import { useEffect, useRef } from "react";
-import type { Attachment, ChatMessage } from "@/lib/types";
-import { IconChevronLeft, PBotAvatar } from "./icons";
+import { useEffect, useRef, useState } from "react";
+import type { Attachment, ChatMessage, VoiceNote } from "@/lib/types";
+import { useScrollFade } from "./behaviors";
+import { Btn, IconBtn } from "./ds";
 import { PBotComposer } from "./PBotComposer";
+import { PBotRive } from "./PBotRive";
 import { PBotSuggestions } from "./PBotSuggestions";
+import { PBotTitle } from "./PBotTitle";
 import { PBotTurn } from "./PBotTurn";
 import type { PBotStatus, TurnStats } from "./usePBot";
+import { usePlayback } from "./useVoice";
 
 const STATUS_LABEL: Record<Exclude<PBotStatus, "idle">, string> = {
   thinking: "Thinking",
@@ -2726,6 +3029,12 @@ const STATUS_LABEL: Record<Exclude<PBotStatus, "idle">, string> = {
 };
 
 interface PBotChatProps {
+  /**
+   * `panel` draws the screen's own header (Back · the chat's name · wordmark)
+   * and PBot waving above the log. `web` leaves both out: the page carries one
+   * top bar for every screen (DS 5706:45980), and the hero already has PBot.
+   */
+  layout: "panel" | "web";
   title: string;
   messages: ChatMessage[];
   status: PBotStatus;
@@ -2735,14 +3044,22 @@ interface PBotChatProps {
   copiedId: string | null;
   ratedIds: Set<string>;
   onBack: () => void;
-  onSend: (text: string, image?: Attachment) => void;
+  onRename: (next: string) => boolean;
+  onSend: (text: string, image?: Attachment, voice?: VoiceNote) => void;
   onStop: () => void;
   onRegenerate: () => void;
   onCopy: (message: ChatMessage) => void;
   onRate: (message: ChatMessage) => void;
 }
 
+/**
+ * The CHAT screen (DS 4951:21717 "AskPbot Chat 1.5"), shared by the panel and
+ * the web page exactly as the source shares `_askpbot-chat` — so the two can
+ * never drift. It is a scene rather than a card: deep-space ground, sparkles,
+ * translucent bubbles; `.pbot-conv--space` paints it.
+ */
 export function PBotChat({
+  layout,
   title,
   messages,
   status,
@@ -2752,6 +3069,7 @@ export function PBotChat({
   copiedId,
   ratedIds,
   onBack,
+  onRename,
   onSend,
   onStop,
   onRegenerate,
@@ -2759,6 +3077,12 @@ export function PBotChat({
   onRate,
 }: PBotChatProps) {
   const logRef = useRef<HTMLDivElement>(null);
+  const playback = usePlayback();
+  const [viewing, setViewing] = useState<{ src: string; name: string } | null>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  // Soft top/bottom edges, and the panel's PBot shrinking as the log fills.
+  useScrollFade(logRef, { compact: layout === "panel" });
 
   // Follow the stream. Keyed on the last message's length too, not just the
   // count, so the view keeps pace as the final bubble grows token by token.
@@ -2768,209 +3092,355 @@ export function PBotChat({
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, lastLength, status]);
 
-  const lastAssistantId = [...messages].reverse().find((m) => m.role === "assistant")?.id;
-  const awaitingFirstToken =
-    isStreaming && messages[messages.length - 1]?.content === "";
-  // The source shows its starter prompts until the first question is asked.
+  useEffect(() => {
+    if (!viewing) return;
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopImmediatePropagation();
+        setViewing(null);
+      }
+    };
+    // Capture, so the viewer closes before the panel's own Escape handler runs.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [viewing]);
+
   const hasUserMessage = messages.some((m) => m.role === "user");
+  // Regenerate needs a question to re-ask; the greeting alone has none.
+  const lastAssistantId = hasUserMessage
+    ? [...messages].reverse().find((m) => m.role === "assistant")?.id
+    : undefined;
+  const last = messages[messages.length - 1];
+  const pendingId = isStreaming && last?.role === "assistant" && last.content === "" ? last.id : null;
 
   return (
-    <div className="pbot-conv">
-      <div className="pbot-conv__head">
-        <button className="pbot-back" type="button" onClick={onBack}>
-          <IconChevronLeft size={18} />
-          <span>Back</span>
-        </button>
-        <strong className="pbot-conv__title">{title}</strong>
+    <div className="pbot-conv pbot-conv--space">
+      {/* Scene decoration (DS 5274:96555 / 6749:206556). The web page hides
+          this layer and draws its own sky; the panel shows it. */}
+      <div className="pbot-scene pbot-scene--space" aria-hidden="true">
+        {/* eslint-disable @next/next/no-img-element */}
+        <img className="pbot-scene__spark pbot-scene__spark--node" src="/pbot/askpbot/chat-sparkle-scene.svg" alt="" width={7} height={7} />
+        <img className="pbot-scene__spark pbot-scene__spark--a" src="/pbot/askpbot/sparkle.svg" alt="" width={14} height={14} />
+        <img className="pbot-scene__spark pbot-scene__spark--b" src="/pbot/askpbot/chat-sparkle-10.svg" alt="" width={10} height={10} />
+        <img className="pbot-scene__spark pbot-scene__spark--c" src="/pbot/askpbot/chat-sparkle-9.svg" alt="" width={9} height={9} />
+        {/* eslint-enable @next/next/no-img-element */}
       </div>
 
-      <div
-        className="pbot-conv__log"
-        ref={logRef}
-        role="log"
-        aria-live="polite"
-        aria-label="Conversation with PBot"
-      >
-        {messages.map((m) => (
-          <PBotTurn
-            key={m.id}
-            message={m}
-            isLast={m.id === lastAssistantId}
-            isStreaming={isStreaming}
-            copiedId={copiedId}
-            rated={ratedIds.has(m.id)}
-            onCopy={onCopy}
-            onRate={onRate}
-            onRegenerate={onRegenerate}
-          />
-        ))}
-
-        {/* Typing dots, shown only while waiting for the first token. */}
-        {awaitingFirstToken && status !== "idle" && (
-          <div className="pbot-turn pbot-turn--bot">
-            <span className="pbot-turn__avatar">
-              <PBotAvatar size={28} />
-            </span>
-            <div className="pbot-turn__col">
-              <p className="pbot-bubble pbot-bubble--typing" aria-label={STATUS_LABEL[status]}>
-                <span />
-                <span />
-                <span />
-              </p>
-              <p className="pbot-turn__phase">{STATUS_LABEL[status]}…</p>
+      {layout === "panel" && (
+        <>
+          {/* Header (DS 4951:21739) — Back left; the chat's renamable name and
+              the wordmark right. */}
+          <div className="pbot-conv__head">
+            <Btn variant="secondary" size="m" iconStart="chevron-left" onClick={onBack}>
+              Back
+            </Btn>
+            <div className="pbot-conv__brand">
+              <PBotTitle className="pbot-orbit__chip" title={title} onRename={onRename} />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="pbot-conv__mark" src="/pbot/askpbot/askpbot-wordmark.png" alt="Ask PBot" width={42} height={26} />
             </div>
           </div>
-        )}
 
-        {error && (
-          <div className="pbot-error" role="alert">
-            {error}
+          {/* PBot above the log (DS 4951:21742), with his glow, two sparks and
+              the motion strokes that quicken while a reply streams. */}
+          <div className="pbot-orbit" aria-hidden="true">
+            <span className="pbot-orbit__glow" />
+            <span className={`pbot-orbit__face ${isStreaming ? "is-talking" : ""}`}>
+              <PBotRive size={200} className="pbot-podium__canvas" />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="pbot-orbit__lines" src="/pbot/askpbot/chat-motion-lines.svg" alt="" width={41} height={35} />
+            </span>
+            {/* eslint-disable @next/next/no-img-element */}
+            <img className="pbot-orbit__spark pbot-orbit__spark--1" src="/pbot/askpbot/chat-sparkle-white.svg" alt="" width={14} height={14} />
+            <img className="pbot-orbit__spark pbot-orbit__spark--2" src="/pbot/askpbot/chat-sparkle-yellow.svg" alt="" width={8} height={8} />
+            {/* eslint-enable @next/next/no-img-element */}
           </div>
-        )}
+        </>
+      )}
 
-        {!hasUserMessage && !isStreaming && <PBotSuggestions onPick={onSend} />}
+      <div className="pbot-conv__logwrap">
+        <div className="pbot-conv__log" ref={logRef} role="log" aria-live="polite" aria-label="Conversation with PBot">
+          {messages.map((m) => (
+            <PBotTurn
+              key={m.id}
+              message={m}
+              isLast={m.id === lastAssistantId}
+              isStreaming={isStreaming}
+              isPending={m.id === pendingId}
+              copiedId={copiedId}
+              rated={ratedIds.has(m.id)}
+              playback={playback}
+              onCopy={onCopy}
+              onRate={onRate}
+              onRegenerate={onRegenerate}
+              onViewImage={(src, name) => setViewing({ src, name })}
+            />
+          ))}
+
+          {/* Ours, not the source's: the phase under the dots separates
+              thinking from a tool call from writing. */}
+          {isStreaming && status !== "idle" && (pendingId || status === "tool") && (
+            <p className="pbot-turn__phase">{STATUS_LABEL[status]}…</p>
+          )}
+
+          {error && (
+            <div className="pbot-error" role="alert">
+              {error}
+            </div>
+          )}
+
+          {!hasUserMessage && !isStreaming && <PBotSuggestions onPick={(p) => onSend(p)} />}
+        </div>
       </div>
 
-      <PBotComposer onSend={onSend} onStop={onStop} isStreaming={isStreaming} />
+      <PBotComposer
+        variant="chat"
+        onSend={onSend}
+        onStop={onStop}
+        isStreaming={isStreaming}
+        playback={playback}
+        footer={
+          <p className="pbot-disclaimer">
+            Pbot may make mistakes, please double-check the answers.
+            {lastTurn && (
+              <span className="pbot-telemetry">
+                {" · "}
+                {lastTurn.usage.inputTokens.toLocaleString()} in · {lastTurn.usage.outputTokens.toLocaleString()} out ·{" "}
+                {(lastTurn.latencyMs / 1000).toFixed(1)}s
+                {lastTurn.truncated && " · hit output limit"}
+              </span>
+            )}
+          </p>
+        }
+      />
 
-      <p className="pbot-disclaimer">
-        Pbot may make mistakes, please double-check the answers.
-        {lastTurn && (
-          <span className="pbot-telemetry">
-            {" · "}
-            {lastTurn.usage.inputTokens.toLocaleString()} in ·{" "}
-            {lastTurn.usage.outputTokens.toLocaleString()} out ·{" "}
-            {(lastTurn.latencyMs / 1000).toFixed(1)}s
-            {lastTurn.truncated && " · hit output limit"}
-          </span>
-        )}
-      </p>
+      {viewing && (
+        // Image viewer (DS 5274:100124) on the shared .pbot-modal shell.
+        <div className="pbot-modal" role="dialog" aria-modal="true" aria-labelledby="pbot-viewer-title">
+          <div className="pbot-modal__scrim" onClick={() => setViewing(null)} />
+          <div className="pbot-modal__card pbot-modal__card--viewer">
+            <div className="pbot-viewer__head">
+              <p className="pbot-viewer__title" id="pbot-viewer-title">
+                Image for the message:
+              </p>
+              <IconBtn
+                ref={closeRef}
+                className="pbot-viewer__close"
+                variant="tertiary"
+                size="l"
+                icon="x"
+                onClick={() => setViewing(null)}
+                aria-label="Close image"
+              />
+            </div>
+            <div className="pbot-viewer__frame">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="pbot-viewer__img" src={viewing.src} alt={viewing.name} />
+            </div>
+            <p className="pbot-viewer__name">{viewing.name}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 ```
 
 #### `components/pbot/PBotTurn.tsx`  
-_99 lines_
+_161 lines_
 
 ```tsx
 "use client";
 
+import type { CSSProperties } from "react";
 import type { ChatMessage } from "@/lib/types";
-import { IconCheck, IconCopy, IconRefreshCw, IconThumbsUp, PBotAvatar } from "./icons";
+import { Icon, IconBtn } from "./ds";
+import { PBotMarkdown } from "./PBotMarkdown";
+import { clock, type usePlayback } from "./useVoice";
 
 interface PBotTurnProps {
   message: ChatMessage;
-  /** Actions render only on the newest assistant turn — see note below. */
+  /** The newest assistant turn: it alone carries Regenerate, and the shine. */
   isLast: boolean;
   isStreaming: boolean;
+  /** The reply being streamed has no text yet — draw the typing dots. */
+  isPending: boolean;
   copiedId: string | null;
   rated: boolean;
+  playback: ReturnType<typeof usePlayback>;
   onCopy: (message: ChatMessage) => void;
   onRate: (message: ChatMessage) => void;
   onRegenerate: () => void;
+  onViewImage: (src: string, name: string) => void;
 }
 
 /**
- * One conversation turn.
+ * One conversation turn — the source's `.pbot-turn` (DS 4951:21717): PBot's
+ * face on the left of his bubble, the student's on the right of theirs, the
+ * bubbles drawn from the DS's own border-image art.
  *
- * Assistant text renders as whitespace-preserved plain text, not parsed
- * markdown. Rendering model output as HTML is the app's largest injection
- * surface and doing it safely needs a sanitiser plus a hardened renderer;
- * text is correct and safe today, and markdown is additive behind this one
- * component.
- *
- * Copy and thumbs-up appear on every assistant turn, but Regenerate only on the
- * last one — regenerating from the middle would discard everything after it,
- * and a destructive action shouldn't hide behind an icon that looks identical
- * to the safe ones next to it.
+ * Copy and thumbs-up appear on every finished reply; Regenerate only on the
+ * last — regenerating from the middle would discard everything after it, and a
+ * destructive action should not hide behind an icon identical to the safe ones.
  */
 export function PBotTurn({
   message,
   isLast,
   isStreaming,
+  isPending,
   copiedId,
   rated,
+  playback,
   onCopy,
   onRate,
   onRegenerate,
+  onViewImage,
 }: PBotTurnProps) {
   const isUser = message.role === "user";
-  const preview = message.image
-    ? `data:${message.image.mediaType};base64,${message.image.data}`
-    : null;
+  const preview = message.image ? `data:${message.image.mediaType};base64,${message.image.data}` : null;
+  const voice = isUser ? message.voice : undefined;
+  const playing = playback.isPlaying(voice?.url);
 
   return (
     <div className={`pbot-turn pbot-turn--${isUser ? "user" : "bot"}`}>
       {!isUser && (
-        <span className="pbot-turn__avatar">
-          <PBotAvatar size={28} />
+        <span className={`pbot-turn__avatar ${isPending ? "is-thinking" : ""}`}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/pbot/askpbot/pbot-face.svg" alt="" width={50} height={50} />
         </span>
       )}
 
       <div className="pbot-turn__col">
-        {preview && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img className="pbot-turn__image" src={preview} alt="Attached" />
-        )}
-        {message.imagePlaceholder && !preview && (
-          <p className="pbot-turn__imagenote">📎 image (not kept in history)</p>
-        )}
-
-        {message.content && (
+        {isPending ? (
+          <p className="pbot-bubble pbot-bubble--typing" aria-label="PBot is typing">
+            <span />
+            <span />
+            <span />
+          </p>
+        ) : voice ? (
+          // DS 5274:97435 — play, the take's own waveform, its length. The
+          // transcript under it is ours: it is what PBot actually received, so
+          // the student can see what was heard.
+          <div
+            className={`pbot-bubble pbot-voicemsg ${playing ? "is-playing" : ""}`}
+            style={{ "--play-progress": `${(playing ? playback.progress : 0) * 100}%` } as CSSProperties}
+          >
+            <IconBtn
+              variant="primary"
+              size="s"
+              icon="play-filled"
+              className={`pbot-voicemsg__play ${playing ? "is-playing" : ""}`}
+              onClick={() => playback.toggle(voice.url)}
+              disabled={!voice.url}
+              aria-label={!voice.url ? "Voice note no longer available" : playing ? "Pause voice note" : "Play voice note"}
+            />
+            <span className="pbot-wave pbot-wave--msg" aria-hidden="true">
+              {voice.bars.map((h, i) => (
+                <i className="pbot-wave__bar" style={{ height: `${h}px` }} key={i} />
+              ))}
+            </span>
+            <span className="pbot-voicemsg__time">{clock(voice.seconds)}</span>
+            <p className="pbot-voicemsg__transcript">
+              <span className="sr-only">You said: </span>
+              {message.content}
+            </p>
+          </div>
+        ) : preview || message.imagePlaceholder ? (
+          // DS 5274:97065 — the picture sits ON the bubble; any caption follows.
+          <div className="pbot-bubble pbot-imgmsg">
+            {preview ? (
+              <span className="pbot-imgmsg__grid">
+                <button
+                  type="button"
+                  className="pbot-imgmsg__open"
+                  onClick={() => onViewImage(preview, message.image?.name ?? "Attached image")}
+                  aria-label={`Open ${message.image?.name ?? "attached image"}`}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img className="pbot-imgmsg__img" src={preview} alt={message.image?.name ?? "Attached image"} />
+                </button>
+              </span>
+            ) : (
+              <span className="pbot-imgmsg__gone">Image not kept in history</span>
+            )}
+            {message.content && <p className="pbot-imgmsg__caption">{message.content}</p>}
+          </div>
+        ) : isUser ? (
           <p className="pbot-bubble">
-            <span className="sr-only">{isUser ? "You said: " : "PBot said: "}</span>
+            <span className="sr-only">You said: </span>
             {message.content}
           </p>
+        ) : (
+          <div className={`pbot-bubble pbot-markdown ${isLast && !isStreaming ? "is-latest" : ""}`}>
+            <span className="sr-only">PBot said: </span>
+            <PBotMarkdown text={message.content} />
+          </div>
         )}
 
-        {!isUser && !isStreaming && message.content && (
+        {!isUser && !isPending && !(isStreaming && isLast) && message.content && (
           <div className="pbot-turn__acts">
             <button
               type="button"
               onClick={() => onRate(message)}
               aria-label={rated ? "Marked helpful" : "Mark as helpful"}
               aria-pressed={rated}
-              className={rated ? "is-active" : ""}
+              className={rated ? "is-rated" : ""}
             >
-              <IconThumbsUp size={16} />
+              <Icon name="thumbs-up" />
             </button>
-            <button
-              type="button"
-              onClick={() => onCopy(message)}
-              aria-label={copiedId === message.id ? "Copied" : "Copy"}
-            >
-              {copiedId === message.id ? <IconCheck size={16} /> : <IconCopy size={16} />}
+            <button type="button" onClick={() => onCopy(message)} aria-label={copiedId === message.id ? "Copied" : "Copy"}>
+              <Icon name={copiedId === message.id ? "check" : "clipboard"} />
             </button>
             {isLast && (
               <button type="button" onClick={onRegenerate} aria-label="Regenerate reply">
-                <IconRefreshCw size={16} />
+                <Icon name="refresh-cw" />
               </button>
             )}
           </div>
         )}
       </div>
+
+      {isUser && (
+        // The student's face closes a user turn on the right (5763:87643).
+        // Decorative: the turn is already attributed by its side and colour.
+        <span className="pbot-turn__avatar pbot-turn__avatar--me" aria-hidden="true">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/pbot/profile/avatar-illustration.png" alt="" width={50} height={50} />
+        </span>
+      )}
     </div>
   );
 }
 ```
 
 #### `components/pbot/PBotComposer.tsx`  
-_197 lines_
+_337 lines_
 
 ```tsx
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { validateAttachment } from "@/lib/guardrails";
 import { MAX_INPUT_CHARS } from "@/lib/limits";
-import { ALLOWED_IMAGE_TYPES, type Attachment, type ImageMediaType } from "@/lib/types";
-import { IconImage, IconSend, IconStop, IconX } from "./icons";
+import { ALLOWED_IMAGE_TYPES, type Attachment, type ImageMediaType, type VoiceNote } from "@/lib/types";
+import { IconBtn } from "./ds";
+import { clock, usePlayback, useVoice } from "./useVoice";
 
 interface PBotComposerProps {
-  onSend: (text: string, image?: Attachment) => void;
-  onStop: () => void;
+  /**
+   * `chat` is the conversation's composer (DS 5274:96755): a grow-textarea in
+   * the full-bleed band. `hero` is the idle screen's (DS "Input Group 1.5"): a
+   * one-line field. Both record voice and take an image, so both own a picker.
+   */
+  variant: "chat" | "hero";
+  onSend: (text: string, image?: Attachment, voice?: VoiceNote) => void;
+  onStop?: () => void;
   isStreaming: boolean;
+  /** Shared with the log, so one clip plays at a time across bubbles and take. */
+  playback?: ReturnType<typeof usePlayback>;
+  /** Under the input row: the disclaimer, plus whatever the surface adds. */
+  footer: ReactNode;
 }
 
 /** Reads a File into the base64 payload the API expects (no `data:` prefix). */
@@ -2991,18 +3461,16 @@ function readAsAttachment(file: File): Promise<Attachment> {
   });
 }
 
-export function PBotComposer({ onSend, onStop, isStreaming }: PBotComposerProps) {
+export function PBotComposer({ variant, onSend, onStop, isStreaming, playback, footer }: PBotComposerProps) {
   const [value, setValue] = useState("");
   const [image, setImage] = useState<Attachment | null>(null);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [attachError, setAttachError] = useState<string | null>(null);
-  // 0 = one line (full pill) · 1 = two lines · 2 = three or more. The source
-  // steps the corner radius down as the field grows so a tall box stops
-  // pretending to be a pill; these thresholds are ours because our line-height
-  // and padding differ from the Blade original's.
-  const [grown, setGrown] = useState<0 | 1 | 2>(0);
+  const [attachError, setAttachError] = useState("");
+  const voice = useVoice();
+  const ownPlayback = usePlayback();
+  const play = playback ?? ownPlayback;
 
   const fieldRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Grow with content up to a ceiling, then scroll. Reset to `auto` first so
@@ -3011,47 +3479,43 @@ export function PBotComposer({ onSend, onStop, isStreaming }: PBotComposerProps)
     const el = fieldRef.current;
     if (!el) return;
     el.style.height = "auto";
-    const height = Math.min(el.scrollHeight, 120);
-    el.style.height = `${height}px`;
-    setGrown(height <= 44 ? 0 : height <= 64 ? 1 : 2);
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }, [value]);
 
-  // Return focus to the input when a turn finishes, so you can keep typing.
+  // Hand focus back when a reply finishes, so the student can keep typing.
   useEffect(() => {
-    if (!isStreaming) fieldRef.current?.focus();
+    if (!isStreaming) (fieldRef.current ?? inputRef.current)?.focus({ preventScroll: true });
   }, [isStreaming]);
 
   const overLimit = value.length > MAX_INPUT_CHARS;
-  const canSend = (value.trim().length > 0 || image !== null) && !isStreaming && !overLimit;
+  const hasContent = value.trim().length > 0 || image !== null;
+  const canSend = hasContent && !isStreaming && !overLimit;
+  const error = attachError || voice.error;
 
   function clearImage() {
     setImage(null);
-    setImagePreview(null);
-    setAttachError(null);
+    setAttachError("");
     if (fileRef.current) fileRef.current.value = "";
   }
 
   async function onPickFile(file: File | undefined) {
     if (!file) return;
-    setAttachError(null);
-
+    setAttachError("");
+    voice.setError("");
     const attachment = await readAsAttachment(file).catch(() => null);
     if (!attachment) {
       setAttachError("Could not read that file.");
       return;
     }
-
-    // Same rules the server enforces, run here so the failure is immediate
-    // instead of arriving after an upload round-trip.
+    // The server enforces the same rules; running them here makes the
+    // failure immediate instead of arriving after an upload round-trip.
     const verdict = validateAttachment(attachment);
     if (!verdict.ok) {
       setAttachError(verdict.message);
       if (fileRef.current) fileRef.current.value = "";
       return;
     }
-
     setImage(attachment);
-    setImagePreview(`data:${attachment.mediaType};base64,${attachment.data}`);
   }
 
   function submit() {
@@ -3061,132 +3525,281 @@ export function PBotComposer({ onSend, onStop, isStreaming }: PBotComposerProps)
     clearImage();
   }
 
-  return (
-    <>
-      {(imagePreview || attachError) && (
-        <div className="pbot-attach">
-          {imagePreview && (
-            <div className="pbot-attach__chip">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={imagePreview} alt={image?.name ?? "Attached image"} />
-              <button type="button" onClick={clearImage} aria-label="Remove image">
-                <IconX size={14} />
-              </button>
-            </div>
-          )}
-          {attachError && (
-            <p className="pbot-attach__error" role="alert">
-              {attachError}
-            </p>
+  async function sendVoice() {
+    if (isStreaming) return;
+    const result = await voice.finish();
+    if (!result) return;
+    // A staged image rides along with the spoken turn, as it would with text.
+    onSend(result.transcript, image ?? undefined, result.note);
+    clearImage();
+  }
+
+  const picker = (
+    // Off-screen rather than display:none so it stays a real control; the
+    // image button clicks it inside the user's own click.
+    <input
+      ref={fileRef}
+      className="pbot-filepicker"
+      type="file"
+      accept={ALLOWED_IMAGE_TYPES.join(",")}
+      tabIndex={-1}
+      aria-hidden="true"
+      onChange={(e) => void onPickFile(e.target.files?.[0])}
+    />
+  );
+
+  const chip = image && (
+    // DS 5274:100794 "Label Badge - 1.5". One image per turn here, so the row
+    // is always the single-chip layout.
+    <div className="pbot-attach-host">
+      <div className="pbot-attach is-single">
+        <span className="pbot-attach__chip">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img className="pbot-attach__thumb" src={`data:${image.mediaType};base64,${image.data}`} alt="" />
+          <span className="pbot-attach__meta">
+            <span className="pbot-attach__name">{image.name ?? "Image"}</span>
+            <span className="pbot-attach__hint">Preview</span>
+          </span>
+          <IconBtn variant="delete" size="s" icon="trash-2" onClick={clearImage} aria-label="Remove attachment" />
+        </span>
+      </div>
+    </div>
+  );
+
+  const take = voice.take;
+  const composeClass = variant === "hero" ? "pbot-compose pbot-web__compose" : "pbot-compose";
+
+  const voicebar = take?.state === "recording" ? (
+    // DS 5274:97093 — discard · live waveform + timer · stop.
+    <div className={`${composeClass} pbot-voicebar`}>
+      <IconBtn variant="delete" size="l" icon="trash-2" onClick={voice.discard} aria-label="Discard recording" />
+      <span className="pbot-wave-panel">
+        <span className="pbot-wave pbot-wave--rec" aria-hidden="true">
+          {take.bars.map((h, i) => (
+            <i className="pbot-wave__bar" style={{ height: `${h}px` }} key={i} />
+          ))}
+        </span>
+      </span>
+      <span className="pbot-voicebar__time is-rec" role="timer" aria-label={`Recording, ${clock(take.seconds)}`}>
+        {clock(take.seconds)}
+      </span>
+      <IconBtn variant="primary" size="l" icon="arrow-up" onClick={voice.stop} aria-label="Stop recording" />
+    </div>
+  ) : take?.state === "recorded" ? (
+    // DS 5274:97487 — discard · play · waveform with playhead · send.
+    <div className={`${composeClass} pbot-voicebar`}>
+      <IconBtn variant="delete" size="l" icon="trash-2" onClick={voice.discard} aria-label="Discard recording" />
+      <IconBtn
+        variant="primary"
+        size="l"
+        icon="play-filled"
+        className={`pbot-voice-play ${play.isPlaying(take.url) ? "is-playing" : ""}`}
+        onClick={() => play.toggle(take.url)}
+        disabled={!take.url}
+        aria-label={play.isPlaying(take.url) ? "Pause recording" : "Play recording"}
+      />
+      <span
+        className={`pbot-wave-panel ${play.isPlaying(take.url) ? "is-playing" : ""}`}
+        style={{ "--play-progress": `${(play.isPlaying(take.url) ? play.progress : 0) * 100}%` } as CSSProperties}
+      >
+        <span className="pbot-wave pbot-wave--rec is-done" aria-hidden="true">
+          {take.bars.map((h, i) => (
+            <i className="pbot-wave__bar" style={{ height: `${h}px` }} key={i} />
+          ))}
+        </span>
+        <i
+          className={`pbot-wave__head ${play.isPlaying(take.url) ? "is-live" : ""}`}
+          aria-hidden="true"
+          style={{ left: `${(play.isPlaying(take.url) ? play.progress : 0) * 100}%` }}
+        />
+      </span>
+      <span className="pbot-voicebar__time">{clock(take.seconds)}</span>
+      <IconBtn
+        variant="primary"
+        size="l"
+        icon="arrow-up"
+        onClick={() => void sendVoice()}
+        disabled={isStreaming}
+        aria-label="Send voice note"
+      />
+    </div>
+  ) : null;
+
+  const form = !take && (
+    <form
+      className={composeClass}
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
+      <div className="pbot-compose__group">
+        <div className="pbot-compose__pill">
+          {variant === "chat" ? (
+            <textarea
+              ref={fieldRef}
+              className={`pbot-compose__field ${overLimit ? "is-over" : ""}`}
+              value={value}
+              rows={1}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter sends; Shift+Enter is a newline.
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder="Type a message ..."
+              aria-label="Message PBot"
+              autoComplete="off"
+            />
+          ) : (
+            <input
+              ref={inputRef}
+              type="text"
+              className={`pbot-compose__field pbot-compose__field--input ${overLimit ? "is-over" : ""}`}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder="Type a message ..."
+              aria-label="Message PBot"
+              autoComplete="off"
+            />
           )}
         </div>
-      )}
-
-      <form
-        className="pbot-compose"
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit();
+        {/* Send (idle) ↔ Stop (streaming), DS 5574:9053 — a raised disc in a
+            lane that opens only once there is something to send, or while a
+            reply streams and Stop has to be reachable. */}
+        <span className={`pbot-compose__sendwrap ${hasContent || isStreaming ? "is-ready" : ""}`}>
+          {isStreaming && onStop ? (
+            <IconBtn
+              className="pbot-compose__stop"
+              variant="secondary"
+              size="l"
+              icon="square"
+              onClick={onStop}
+              aria-label="Stop generating"
+            />
+          ) : (
+            <IconBtn
+              className="pbot-compose__send"
+              variant="primary"
+              size="l"
+              icon="arrow-up"
+              type="submit"
+              disabled={!canSend}
+              aria-label="Send"
+            />
+          )}
+        </span>
+      </div>
+      <IconBtn
+        variant="secondary"
+        size="l"
+        icon="mic"
+        onClick={() => {
+          setAttachError("");
+          void voice.start();
         }}
-      >
-        <textarea
-          ref={fieldRef}
-          className={`pbot-compose__field ${overLimit ? "is-over" : ""} ${
-            grown ? `is-grown-${grown}` : ""
-          }`}
-          value={value}
-          rows={1}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => {
-            // Enter sends; Shift+Enter is a newline.
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
-          }}
-          placeholder="Type a message …"
-          aria-label="Message PBot"
-          autoComplete="off"
-        />
+        disabled={isStreaming}
+        aria-label="Record a voice message"
+      />
+      <IconBtn
+        variant="secondary"
+        size="l"
+        icon="image"
+        onClick={() => fileRef.current?.click()}
+        disabled={isStreaming}
+        aria-label="Attach image"
+      />
+    </form>
+  );
 
-        {isStreaming ? (
-          <button
-            className="pbot-compose__send"
-            type="button"
-            onClick={onStop}
-            aria-label="Stop generating"
-          >
-            <IconStop size={16} />
-          </button>
-        ) : (
-          <button
-            className="pbot-compose__send"
-            type="submit"
-            disabled={!canSend}
-            aria-label="Send"
-          >
-            <IconSend size={18} />
-          </button>
-        )}
+  const count = value.length > MAX_INPUT_CHARS * 0.8 && (
+    <p className={`pbot-count ${overLimit ? "is-over" : ""}`}>
+      {value.length.toLocaleString()} / {MAX_INPUT_CHARS.toLocaleString()}
+    </p>
+  );
 
-        <button
-          className="pbot-compose__extra"
-          type="button"
-          onClick={() => fileRef.current?.click()}
-          disabled={isStreaming}
-          aria-label="Attach image"
-        >
-          <IconImage size={18} />
-        </button>
+  const errorLine = error && (
+    <p className="pbot-composer__error" role="status">
+      {error}
+    </p>
+  );
 
-        <input
-          ref={fileRef}
-          type="file"
-          accept={ALLOWED_IMAGE_TYPES.join(",")}
-          hidden
-          onChange={(e) => void onPickFile(e.target.files?.[0])}
-        />
-      </form>
+  if (variant === "hero") {
+    // The hero's column lays these out itself (.pbot-web__column), so no band.
+    return (
+      <>
+        {picker}
+        {chip}
+        {errorLine}
+        {voicebar}
+        {form}
+        {count}
+        {footer}
+      </>
+    );
+  }
 
-      {value.length > MAX_INPUT_CHARS * 0.8 && (
-        <p className={`pbot-count ${overLimit ? "is-over" : ""}`}>
-          {value.length.toLocaleString()} / {MAX_INPUT_CHARS.toLocaleString()}
-        </p>
-      )}
+  return (
+    <>
+      {chip}
+      <div className="pbot-composer">
+        {picker}
+        {errorLine}
+        {voicebar}
+        {form}
+        {count}
+        {footer}
+      </div>
     </>
   );
 }
 ```
 
 #### `components/pbot/PBotMascot.tsx`  
-_29 lines_
+_43 lines_
 
 ```tsx
 "use client";
 
+import { useEffect, useState } from "react";
+import { PBotRive } from "./PBotRive";
+
 /**
- * The fixed mascot, pinned bottom-right, that opens the panel.
- *
- * The source repo renders a Rive animation (`rive/pbot.riv`) here. This is the
- * static stand-in the extract notes as an acceptable fallback — swap the inner
- * markup for a <Rive> canvas or the real SVG and nothing else changes.
+ * The floating PBot that opens the panel — the source's `pbot-fab`: the waving
+ * Rive mascot, fixed bottom-right, that "poofs" away when tapped. Not draggable,
+ * no gaze-follow — both were removed from the source on request.
  *
  * It dispatches the same `pbot-open` window event a host app would, so this
- * component is an example of the integration rather than a special case of it.
+ * component is an example of the integration rather than a special case of it,
+ * and it learns the panel closed from the panel's `pbot-closed` reply.
+ *
+ * The source hides it at ≤1024px (components.css); the `/embed` page keeps a
+ * plain launcher button for those widths.
  */
 export function PBotMascot() {
+  const [away, setAway] = useState(false);
+
+  useEffect(() => {
+    const back = () => setAway(false);
+    window.addEventListener("pbot-closed", back);
+    return () => window.removeEventListener("pbot-closed", back);
+  }, []);
+
   return (
     <button
-      className="home-pbot"
+      className={`home-pbot ${away ? "is-away" : ""}`}
       type="button"
-      onClick={() => window.dispatchEvent(new CustomEvent("pbot-open"))}
-      aria-label="Open Ask PBot"
+      onClick={() => {
+        setAway(true);
+        window.dispatchEvent(new CustomEvent("pbot-open"));
+      }}
+      aria-label="Ask PBot"
     >
-      <span className="home-pbot__bubble" aria-hidden="true">
-        Ask me anything!
-      </span>
-      <span className="home-pbot__face" aria-hidden="true">
-        🐼
+      <span className="home-pbot__poof" aria-hidden="true" />
+      <span className="home-pbot__diver" aria-hidden="true">
+        <PBotRive size={360} className="home-pbot__canvas" />
       </span>
     </button>
   );
@@ -3194,10 +3807,12 @@ export function PBotMascot() {
 ```
 
 #### `components/pbot/PBotLauncher.tsx`  
-_18 lines_
+_21 lines_
 
 ```tsx
 "use client";
+
+import { Btn } from "./ds";
 
 /**
  * A plain button that opens the panel. Deliberately does not import the panel
@@ -3206,156 +3821,835 @@ _18 lines_
  */
 export function PBotLauncher() {
   return (
-    <button
-      type="button"
+    <Btn
+      variant="primary"
+      size="l"
+      iconEnd="chevron-btn-m"
       onClick={() => window.dispatchEvent(new CustomEvent("pbot-open"))}
-      className="bg-accent text-accent-contrast rounded-full px-5 py-2.5 text-sm font-semibold transition-transform hover:-translate-y-0.5"
     >
       Ask PBot
-    </button>
+    </Btn>
   );
 }
 ```
 
-#### `components/pbot/icons.tsx`  
-_124 lines_
+
+#### `components/pbot/ds.tsx`  
+_131 lines_
 
 ```tsx
+"use client";
+
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+
 /**
- * Feather-style line icons, inlined as components.
+ * The three Pandai DS primitives the AskPBot screens are built from, emitting the
+ * same markup as the source's Blade components so `app/pbot.css` — extracted from
+ * that source — styles them unchanged:
  *
- * Inlined rather than pulled from a package: the panel needs nine icons, an
- * icon library costs a dependency and a bundle, and these are 24x24 stroke
- * paths that never change. Names match the `<x-icon name="…">` usages in the
- * source Blade template so the two stay comparable.
+ *   <x-icon>      → <Icon>      an <svg><use> into the cut-down sprite
+ *   <x-btn>       → <Btn>       .btn + .btn__face (the 3D push-button)
+ *   <x-icon-btn>  → <IconBtn>   .icon-btn + .icon-btn__face
+ *
+ * The `.btn__face` layer is load-bearing: `.btn:has(.btn__face)` is what switches
+ * the stylesheet into push-button mode, and it is the element the bounce animates.
  */
 
-type IconProps = { size?: number; className?: string };
+export type IconName =
+  | "arrow-up"
+  | "check"
+  | "chevron-btn-m"
+  | "chevron-down"
+  | "chevron-left"
+  | "clipboard"
+  | "edit"
+  | "image"
+  | "maximize-2"
+  | "mic"
+  | "more-vertical"
+  | "play-filled"
+  | "refresh-cw"
+  | "square"
+  | "thumbs-up"
+  | "trash-2"
+  | "x";
 
-function Svg({ size = 20, className, children }: IconProps & { children: React.ReactNode }) {
+export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden="true"
-      focusable="false"
-    >
-      {children}
+    <svg aria-hidden="true" focusable="false" width={size} height={size}>
+      <use href={`/pbot/icons.svg#ic-${name}`} />
     </svg>
   );
 }
 
-export const IconX = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M18 6 6 18M6 6l12 12" />
-  </Svg>
+type Size = "s" | "m" | "l";
+
+interface BtnProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: "primary" | "secondary" | "tertiary" | "danger";
+  size?: Size;
+  block?: boolean;
+  iconStart?: IconName;
+  iconEnd?: IconName;
+  children: ReactNode;
+}
+
+export const Btn = forwardRef<HTMLButtonElement, BtnProps>(function Btn(
+  { variant = "primary", size = "m", block, iconStart, iconEnd, className = "", children, type = "button", ...rest },
+  ref,
+) {
+  const iconSize = size === "s" ? 14 : 16;
+  // DS: a leading chevron/arrow sits in the disc ("L Arrow" slot); any other
+  // leading icon is bare. A trailing icon always takes the disc.
+  const leadingIsArrow = iconStart && /chevron|arrow/.test(iconStart);
+  const classes = `btn btn--${variant} btn--${size}${block ? " btn--block" : ""} ${className}`.trim();
+  return (
+    <button ref={ref} type={type} className={classes} {...rest}>
+      <span className="btn__face">
+        {iconStart && (
+          <span className={leadingIsArrow ? "btn__disc" : "btn__lead"}>
+            <Icon name={iconStart} size={iconSize} />
+          </span>
+        )}
+        <span className="btn__label">{children}</span>
+        {iconEnd && (
+          <span className="btn__disc">
+            <Icon name={iconEnd} size={iconSize} />
+          </span>
+        )}
+      </span>
+    </button>
+  );
+});
+
+interface IconBtnProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: "primary" | "secondary" | "tertiary" | "delete";
+  size?: Size;
+  icon: IconName;
+  /** Icon-only, so a name is mandatory. */
+  "aria-label": string;
+}
+
+export const IconBtn = forwardRef<HTMLButtonElement, IconBtnProps>(function IconBtn(
+  { variant = "primary", size = "m", icon, className = "", type = "button", ...rest },
+  ref,
+) {
+  const iconSize = size === "l" ? 24 : size === "s" ? 12 : 16;
+  return (
+    <button
+      ref={ref}
+      type={type}
+      className={`icon-btn icon-btn--${variant} icon-btn--${size} ${className}`.trim()}
+      {...rest}
+    >
+      <span className="icon-btn__face">
+        <Icon name={icon} size={iconSize} />
+      </span>
+    </button>
+  );
+}
 );
 
-export const IconChevronLeft = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="m15 18-6-6 6-6" />
-  </Svg>
-);
-
-export const IconChevronRight = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="m9 18 6-6-6-6" />
-  </Svg>
-);
-
-export const IconMoreVertical = (p: IconProps) => (
-  <Svg {...p}>
-    <circle cx="12" cy="12" r="1" />
-    <circle cx="12" cy="5" r="1" />
-    <circle cx="12" cy="19" r="1" />
-  </Svg>
-);
-
-export const IconThumbsUp = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z" />
-  </Svg>
-);
-
-export const IconCopy = (p: IconProps) => (
-  <Svg {...p}>
-    <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
-    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
-  </Svg>
-);
-
-export const IconRefreshCw = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-    <path d="M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
-    <path d="M8 16H3v5" />
-  </Svg>
-);
-
-export const IconSend = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="m22 2-7 20-4-9-9-4Z" />
-    <path d="M22 2 11 13" />
-  </Svg>
-);
-
-export const IconImage = (p: IconProps) => (
-  <Svg {...p}>
-    <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
-    <circle cx="9" cy="9" r="2" />
-    <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
-  </Svg>
-);
-
-export const IconCheck = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M20 6 9 17l-5-5" />
-  </Svg>
-);
-
-export const IconTrash = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-  </Svg>
-);
-
-export const IconStop = (p: IconProps) => (
-  <Svg {...p}>
-    <rect width="12" height="12" x="6" y="6" rx="1.5" />
-  </Svg>
-);
-
-/**
- * The panda avatar. A stand-in for `mascot/pbot-awe.svg` from the source repo —
- * swap this component's body for that asset (or an <Image>) when porting.
- */
-export const PBotAvatar = ({ size = 28 }: { size?: number }) => (
-  <span
-    className="pbot-avatar"
-    style={{ width: size, height: size, fontSize: size * 0.62 }}
-    aria-hidden="true"
-  >
-    🐼
-  </span>
-);
+/** The same face, as a link — the panel's Maximize goes to the web page. */
+export function IconLink({
+  href,
+  icon,
+  className = "",
+  label,
+}: {
+  href: string;
+  icon: IconName;
+  className?: string;
+  label: string;
+}) {
+  return (
+    <a href={href} className={`icon-btn icon-btn--secondary icon-btn--l ${className}`.trim()} aria-label={label}>
+      <span className="icon-btn__face">
+        <Icon name={icon} size={24} />
+      </span>
+    </a>
+  );
+}
 ```
 
+#### `components/pbot/behaviors.ts`  
+_156 lines_
+
+```ts
+"use client";
+
+import { useEffect, useState, type RefObject } from "react";
+
+/**
+ * Three small behaviours the source keeps in `resources/js/pandai/`, ported as
+ * hooks. The CSS for all three is in `app/pbot.css`; these only toggle classes.
+ */
+
+/**
+ * The DS push-button spring (behaviors.js, BOUNCE_TARGETS). Replays the
+ * `btn-raise` keyframe on a button's face whenever it RAISES — the pointer
+ * enters from outside, or a press is released. CSS `:hover` cannot restart an
+ * animation reliably across `:active`, which is why the source drives it from
+ * script, delegated on the document so it covers buttons rendered later.
+ *
+ * Mounted once per surface; the listener is idempotent across mounts.
+ */
+const BOUNCE = [
+  { host: ".btn", face: ".btn__face" },
+  { host: ".icon-btn", face: ".icon-btn__face" },
+];
+let bounceUsers = 0;
+
+function bounceFrom(e: MouseEvent) {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const target = e.target as Element | null;
+  for (const { host, face } of BOUNCE) {
+    const el = target?.closest?.(host) as HTMLButtonElement | null;
+    if (!el) continue;
+    // mouseover fires on every internal move — only a real enter counts.
+    if (e.type === "mouseover" && e.relatedTarget instanceof Node && el.contains(e.relatedTarget)) return;
+    if (el.disabled || el.classList.contains("is-disabled") || el.classList.contains("is-active")) return;
+    const f = el.querySelector(face);
+    if (!f) return;
+    f.classList.remove("btn-raise");
+    void (f as HTMLElement).offsetWidth; // reflow, so the animation restarts
+    f.classList.add("btn-raise");
+    return;
+  }
+}
+
+function clearBounce(e: AnimationEvent) {
+  if (e.animationName === "btnPrimaryRaise" || e.animationName === "btnPrimaryRaiseS") {
+    (e.target as Element).classList.remove("btn-raise");
+  }
+}
+
+export function useButtonBounce() {
+  useEffect(() => {
+    if (bounceUsers++ === 0) {
+      document.addEventListener("mouseover", bounceFrom);
+      document.addEventListener("mouseup", bounceFrom);
+      document.addEventListener("animationend", clearBounce);
+    }
+    return () => {
+      if (--bounceUsers === 0) {
+        document.removeEventListener("mouseover", bounceFrom);
+        document.removeEventListener("mouseup", bounceFrom);
+        document.removeEventListener("animationend", clearBounce);
+      }
+    };
+  }, []);
+}
+
+/**
+ * Soft scroll edges (conv-fade.js). The mask gradient is in the CSS; this only
+ * decides when an edge is soft — `is-fade-top` once something has scrolled
+ * above it, `is-fade-bottom` while something is still below. A list that fits
+ * its box gets neither and stays crisp. With `compact`, the element's
+ * `.pbot-conv` also gets `is-compact` while it overflows, which shrinks the
+ * panel chat's PBot hero to make room.
+ *
+ * Classes are set only on a real change: the element is React-rendered, and a
+ * no-op write would still churn the attribute.
+ */
+const EDGE = 2;
+
+function setClass(el: Element, cls: string, want: boolean) {
+  if (el.classList.contains(cls) !== want) el.classList.toggle(cls, want);
+}
+
+export function useScrollFade(ref: RefObject<HTMLElement | null>, { compact = false } = {}) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const apply = () => {
+      const overflow = el.scrollHeight - el.clientHeight;
+      const fits = overflow <= EDGE;
+      setClass(el, "is-fade-top", !fits && el.scrollTop > EDGE);
+      setClass(el, "is-fade-bottom", !fits && el.scrollTop < overflow - EDGE);
+      if (compact) {
+        const conv = el.closest(".pbot-conv");
+        if (conv) setClass(conv, "is-compact", !fits);
+      }
+    };
+    let raf = 0;
+    const schedule = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(apply);
+    };
+    el.addEventListener("scroll", apply, { passive: true });
+    const ro = new ResizeObserver(schedule);
+    ro.observe(el);
+    const mo = new MutationObserver(schedule);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    schedule();
+    return () => {
+      el.removeEventListener("scroll", apply);
+      ro.disconnect();
+      mo.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, [ref, compact]);
+}
+
+/**
+ * Types a string in with a human cadence (behaviors.js, `typewriter`): jitter
+ * per key, a gap between words, longer pauses at clause and sentence ends.
+ * Reduced motion gets the whole string at once.
+ *
+ * Starts EMPTY on both server and client, so hydration agrees and the full
+ * string never flashes before typing begins. The caller renders the complete
+ * text for assistive tech separately — a half-typed heading is noise to a
+ * screen reader.
+ */
+export function useTypewriter(text: string, { delay = 350, speed = 42 } = {}) {
+  const [state, setState] = useState({ shown: "", typing: false });
+
+  useEffect(() => {
+    let timer = 0;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      timer = window.setTimeout(() => setState({ shown: text, typing: false }), 0);
+      return () => window.clearTimeout(timer);
+    }
+    const keyDelay = (ch: string) => {
+      let d = speed * (0.5 + Math.random());
+      if (ch === " ") d += speed * 0.4;
+      else if (",;:".includes(ch)) d += 150 + Math.random() * 130;
+      else if (".!?".includes(ch)) d += 300 + Math.random() * 220;
+      if (Math.random() < 0.05) d += 120 + Math.random() * 170;
+      return d;
+    };
+    let i = 0;
+    const tick = () => {
+      i += 1;
+      const done = i >= text.length;
+      setState({ shown: text.slice(0, i), typing: !done });
+      if (!done) timer = window.setTimeout(tick, keyDelay(text[i - 1]));
+    };
+    timer = window.setTimeout(tick, delay);
+    return () => window.clearTimeout(timer);
+  }, [text, delay, speed]);
+
+  return state;
+}
+```
+
+#### `components/pbot/PBotRive.tsx`  
+_64 lines_
+
+```tsx
+"use client";
+
+import { Alignment, Fit, Layout, Rive, RuntimeLoader } from "@rive-app/canvas";
+import { useEffect, useRef } from "react";
+
+/**
+ * PBot, animated — the source's `<x-rive file="pbot" artboard="PBot Waving">`.
+ *
+ * The runtime's WASM is served from `public/pbot/rive/`, not the unpkg CDN the
+ * package defaults to: the source app goes CDN-free on purpose, and a third-party
+ * fetch on every page load is a dependency this app does not otherwise have.
+ * `scripts/pbot-design/sync.mjs` copies that file out of node_modules, which is
+ * why `@rive-app/canvas` is pinned to an exact version — the JS and the WASM must
+ * be the same build.
+ *
+ * Decorative everywhere it is used, so it renders aria-hidden.
+ */
+
+let wasmPointed = false;
+
+interface PBotRiveProps {
+  size: number;
+  className?: string;
+}
+
+export function PBotRive({ size, className }: PBotRiveProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (!wasmPointed) {
+      RuntimeLoader.setWasmUrl("/pbot/rive/rive.wasm");
+      wasmPointed = true;
+    }
+
+    const rive = new Rive({
+      src: "/pbot/rive/pbot.riv",
+      canvas,
+      artboard: "PBot Waving",
+      stateMachines: "State Machine 1",
+      autoplay: true,
+      layout: new Layout({ fit: Fit.Contain, alignment: Alignment.Center }),
+      onLoad: () => rive.resizeDrawingSurfaceToCanvas(),
+    });
+
+    // The CSS sizes the canvas, often responsively; keep the backing store in
+    // step so PBot stays crisp. One resize per frame, however many fire.
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => rive.resizeDrawingSurfaceToCanvas());
+    });
+    ro.observe(canvas);
+
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+      rive.cleanup();
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} width={size} height={size} className={className} aria-hidden="true" />;
+}
+```
+
+#### `components/pbot/PBotTitle.tsx`  
+_58 lines_
+
+```tsx
+"use client";
+
+import { useLayoutEffect, useRef } from "react";
+
+/**
+ * The open chat's name, renamable in place — the source's `.pbot-orbit__chip`
+ * (6193:24390): Enter commits, Escape cancels, blur commits. Used for that chip
+ * in the panel and for the web top bar's title.
+ *
+ * `plaintext-only`, so a paste cannot drop markup into a chat title. The text
+ * is written imperatively rather than as children: React must not reconcile a
+ * node the user is typing into. A refused edit (blank or unchanged) has to put
+ * the old text back by hand for the same reason — nothing re-renders, because
+ * `title` never changed.
+ */
+export function PBotTitle({
+  className,
+  title,
+  onRename,
+}: {
+  className: string;
+  title: string;
+  onRename: (next: string) => boolean;
+}) {
+  const ref = useRef<HTMLParagraphElement>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && document.activeElement !== el) el.textContent = title;
+  }, [title]);
+
+  return (
+    <p
+      ref={ref}
+      className={className}
+      contentEditable="plaintext-only"
+      suppressContentEditableWarning
+      role="textbox"
+      aria-label="Chat name"
+      title="Rename this chat"
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.currentTarget.blur();
+        } else if (e.key === "Escape") {
+          // Kept from the panel's own Escape-to-close.
+          e.preventDefault();
+          e.stopPropagation();
+          e.currentTarget.textContent = title;
+          e.currentTarget.blur();
+        }
+      }}
+      onBlur={(e) => {
+        if (!onRename(e.currentTarget.textContent ?? "")) e.currentTarget.textContent = title;
+      }}
+    />
+  );
+}
+```
+
+#### `components/pbot/PBotMarkdown.tsx`  
+_47 lines_
+
+```tsx
+"use client";
+
+import Markdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+/**
+ * A bot reply, rendered as markdown.
+ *
+ * The source does this with `x-html="md(text)"`: a regex pass that escapes
+ * `& < >` and then splices tags back in. That is an injection surface — the
+ * escape leaves `"` alone, so a link URL can close its own `href` and add an
+ * attribute — and model output is exactly the text an attacker would steer.
+ *
+ * react-markdown builds React elements and never an HTML string, so there is no
+ * `innerHTML` anywhere on this path. Raw HTML in the reply is dropped, not
+ * rendered (no `rehype-raw`, deliberately), and the default `urlTransform`
+ * strips `javascript:`, `data:` and other unsafe link targets. GFM adds the
+ * tables, strikethrough and task lists models routinely produce.
+ *
+ * The styling is the source's `.pbot-markdown` rules, which already cover
+ * `p`, `ul`/`ol`, `strong`, `em`, `code` and `pre`.
+ */
+
+const components: Components = {
+  // Model links leave the app; never let them take the chat with them.
+  a: ({ href, title, children }) => (
+    <a href={href} title={title} target="_blank" rel="noopener noreferrer nofollow">
+      {children}
+    </a>
+  ),
+  // Images in a reply would be fetched from wherever the model pointed — a
+  // tracking pixel at best. Show the alt text and a link instead.
+  img: ({ src, alt }) =>
+    typeof src === "string" ? (
+      <a href={src} target="_blank" rel="noopener noreferrer nofollow">
+        {alt || "image"}
+      </a>
+    ) : null,
+};
+
+export function PBotMarkdown({ text }: { text: string }) {
+  return (
+    <Markdown remarkPlugins={[remarkGfm]} components={components}>
+      {text}
+    </Markdown>
+  );
+}
+```
+
+#### `components/pbot/useVoice.ts`  
+_316 lines_
+
+```ts
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { VoiceNote } from "@/lib/types";
+
+/**
+ * Voice notes — the source engine's recorder (getUserMedia → MediaRecorder,
+ * with an AnalyserNode drawing the live waveform), plus the one thing the
+ * source never needed: a TRANSCRIPT. The source's replies are mocked; ours come
+ * from a model that reads text, and no audio input exists on this API path. So
+ * the browser's own speech recognition runs alongside the recorder, and what is
+ * sent to PBot is the words. The clip is kept so the bubble can play it back.
+ *
+ * Speech recognition is the Web Speech API: Chrome, Edge and Safari have it,
+ * Firefox does not. Where it is missing the mic says so instead of recording
+ * something PBot can never hear. In Chrome the recognition itself runs on
+ * Google's servers — that is the browser's implementation, not this app's
+ * choice, and it is recorded in docs/SCOPE.md.
+ *
+ * Three things must always happen or the browser leaks, and `cleanup` owns all
+ * three so no path can forget one: every track is stopped (or the tab keeps the
+ * mic and its recording indicator), the AudioContext is closed, and every object
+ * URL is revoked except the one handed to a sent message.
+ */
+
+/** The recognition surface used here. Not in TypeScript's DOM lib. */
+interface Recognition {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((e: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
+  onerror: ((e: { error: string }) => void) | null;
+  onend: (() => void) | null;
+  start(): void;
+  stop(): void;
+  abort(): void;
+}
+type RecognitionCtor = new () => Recognition;
+
+function recognitionCtor(): RecognitionCtor | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as { SpeechRecognition?: RecognitionCtor; webkitSpeechRecognition?: RecognitionCtor };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
+}
+
+export interface VoiceTake {
+  state: "recording" | "recorded";
+  seconds: number;
+  bars: number[];
+  url: string | null;
+}
+
+/** Hard cap, as in the source. */
+const MAX_SECONDS = 120;
+/** The bubble draws this many bars; the composer keeps up to 36. */
+const BUBBLE_BARS = 22;
+
+/** Pick evenly across the take so its shape survives, not just its tail. */
+function resample(bars: number[], n: number): number[] {
+  if (!bars.length) return new Array(n).fill(4);
+  return Array.from({ length: n }, (_, i) => bars[Math.min(bars.length - 1, Math.round((i * (bars.length - 1)) / (n - 1)))]);
+}
+
+export function useVoice() {
+  const [take, setTake] = useState<VoiceTake | null>(null);
+  const [error, setError] = useState("");
+
+  const rec = useRef<MediaRecorder | null>(null);
+  const stream = useRef<MediaStream | null>(null);
+  const chunks = useRef<Blob[]>([]);
+  const actx = useRef<AudioContext | null>(null);
+  const raf = useRef(0);
+  const ticker = useRef(0);
+  const speech = useRef<Recognition | null>(null);
+  const words = useRef<string[]>([]);
+  // Resolves when recognition has delivered its last result — `stop()` asks for
+  // it, but the final words arrive after, on `end`.
+  const heard = useRef<Promise<void> | null>(null);
+  // Mirrors `take` for the callbacks (recorder, analyser, ticker) that outlive
+  // the render they were created in. Every write goes through `update`, so the
+  // two cannot disagree.
+  const takeRef = useRef<VoiceTake | null>(null);
+  const update = useCallback((next: (t: VoiceTake | null) => VoiceTake | null) => {
+    takeRef.current = next(takeRef.current);
+    setTake(takeRef.current);
+  }, []);
+
+  const releaseMic = useCallback(() => {
+    stream.current?.getTracks().forEach((t) => t.stop());
+    stream.current = null;
+    if (actx.current && actx.current.state !== "closed") void actx.current.close().catch(() => {});
+    actx.current = null;
+    rec.current = null;
+  }, []);
+
+  const cleanup = useCallback(
+    (keepUrl: string | null) => {
+      window.clearInterval(ticker.current);
+      cancelAnimationFrame(raf.current);
+      if (rec.current && rec.current.state !== "inactive") {
+        try {
+          rec.current.stop();
+        } catch {
+          /* already stopping */
+        }
+      }
+      speech.current?.abort();
+      speech.current = null;
+      releaseMic();
+      const url = takeRef.current?.url;
+      if (url && url !== keepUrl) URL.revokeObjectURL(url);
+      chunks.current = [];
+      words.current = [];
+      heard.current = null;
+      update(() => null);
+    },
+    [releaseMic, update],
+  );
+
+  // Leaving the screen mid-take must still hand the microphone back.
+  useEffect(() => () => cleanup(null), [cleanup]);
+
+  const stop = useCallback(() => {
+    window.clearInterval(ticker.current);
+    cancelAnimationFrame(raf.current);
+    update((t) => (t ? { ...t, state: "recorded" } : t));
+    speech.current?.stop();
+    if (rec.current && rec.current.state !== "inactive") rec.current.stop();
+    else releaseMic();
+  }, [releaseMic, update]);
+
+  const start = useCallback(async () => {
+    if (takeRef.current) return;
+    setError("");
+    const Speech = recognitionCtor();
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined" || !Speech) {
+      setError("Voice notes need speech recognition, which this browser doesn't have. Try Chrome, Edge or Safari.");
+      return;
+    }
+    try {
+      stream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      const name = e instanceof DOMException ? e.name : "";
+      setError(
+        name === "NotAllowedError" || name === "SecurityError"
+          ? "Microphone access was blocked. Allow it in your browser to record."
+          : "No microphone was found.",
+      );
+      return;
+    }
+
+    update(() => ({ state: "recording", seconds: 0, bars: [], url: null }));
+    chunks.current = [];
+    words.current = [];
+
+    const recorder = new MediaRecorder(stream.current);
+    rec.current = recorder;
+    recorder.ondataavailable = (e) => {
+      if (e.data?.size) chunks.current.push(e.data);
+    };
+    recorder.onstop = () => {
+      const blob = new Blob(chunks.current, { type: recorder.mimeType || "audio/webm" });
+      const url = URL.createObjectURL(blob);
+      update((t) => (t ? { ...t, url } : t));
+      releaseMic();
+    };
+    recorder.start();
+
+    const recognition = new Speech();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = navigator.language || "en-US";
+    recognition.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) words.current.push(e.results[i][0].transcript.trim());
+      }
+    };
+    recognition.onerror = (e) => {
+      // `no-speech` and `aborted` are ordinary outcomes; the empty-transcript
+      // check at send time already covers them.
+      if (e.error === "network") setError("Speech recognition is offline, so PBot can't hear this one. Try typing it.");
+      else if (e.error === "not-allowed" || e.error === "service-not-allowed")
+        setError("Speech recognition was blocked, so PBot can't hear this one.");
+    };
+    heard.current = new Promise((resolve) => {
+      recognition.onend = () => resolve();
+    });
+    speech.current = recognition;
+    try {
+      recognition.start();
+    } catch {
+      /* a second start throws; the first is still running */
+    }
+
+    // Live waveform from the real signal. Sampled every frame, committed every
+    // ~120ms — a bar per frame scrolls far too fast to read.
+    try {
+      const ctx = new AudioContext();
+      actx.current = ctx;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      ctx.createMediaStreamSource(stream.current).connect(analyser);
+      const buf = new Uint8Array(analyser.fftSize);
+      let last = 0;
+      const tick = (now: number) => {
+        if (takeRef.current?.state !== "recording") return;
+        if (now - last > 120) {
+          last = now;
+          analyser.getByteTimeDomainData(buf);
+          let sum = 0;
+          for (const v of buf) sum += ((v - 128) / 128) ** 2;
+          const rms = Math.sqrt(sum / buf.length);
+          // 4px floor so silence still draws a rail; 19px ceiling, the DS range.
+          const h = Math.max(4, Math.min(19, Math.round(4 + rms * 90)));
+          update((t) => (t && t.state === "recording" ? { ...t, bars: [...t.bars, h].slice(-36) } : t));
+        }
+        raf.current = requestAnimationFrame(tick);
+      };
+      raf.current = requestAnimationFrame(tick);
+    } catch {
+      /* No analyser: the take still records, the rail just stays flat. */
+    }
+
+    ticker.current = window.setInterval(() => {
+      update((t) => (t && t.state === "recording" ? { ...t, seconds: t.seconds + 1 } : t));
+      if ((takeRef.current?.seconds ?? 0) >= MAX_SECONDS) stop();
+    }, 1000);
+  }, [releaseMic, stop, update]);
+
+  /**
+   * Ends the take and hands it over as a sendable note, or null with `error`
+   * set when nothing was understood — sending a waveform PBot cannot read would
+   * produce a reply to nothing.
+   */
+  const finish = useCallback(async (): Promise<{ transcript: string; note: VoiceNote } | null> => {
+    const current = takeRef.current;
+    if (!current) return null;
+    if (current.state === "recording") stop();
+    await heard.current;
+    // The recorder's onstop sets the URL; give it the tick it needs.
+    await new Promise((r) => setTimeout(r, 0));
+    const latest = takeRef.current ?? current;
+    const transcript = words.current.join(" ").replace(/\s+/g, " ").trim();
+    if (!transcript) {
+      cleanup(null);
+      setError("PBot couldn't make out any words in that recording. Try again, or type your question.");
+      return null;
+    }
+    const note: VoiceNote = {
+      seconds: Math.max(1, latest.seconds),
+      bars: resample(latest.bars, BUBBLE_BARS),
+      ...(latest.url ? { url: latest.url } : {}),
+    };
+    cleanup(latest.url);
+    return { transcript, note };
+  }, [cleanup, stop]);
+
+  return { take, error, setError, start, stop, finish, discard: () => cleanup(null) };
+}
+
+/**
+ * Which clip is playing — one at a time, shared by the composer's take and
+ * every bubble. Progress rides rAF, not `timeupdate`, which fires ~4x a second
+ * and makes the playhead visibly stutter.
+ */
+export function usePlayback() {
+  const [playingUrl, setPlayingUrl] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
+  const player = useRef<HTMLAudioElement | null>(null);
+  const raf = useRef(0);
+
+  const stopPlayback = useCallback(() => {
+    cancelAnimationFrame(raf.current);
+    player.current?.pause();
+    player.current = null;
+    setPlayingUrl(null);
+    setProgress(0);
+  }, []);
+
+  useEffect(() => stopPlayback, [stopPlayback]);
+
+  const toggle = useCallback(
+    (url: string | null | undefined) => {
+      if (!url) return;
+      if (player.current && playingUrl === url) {
+        stopPlayback();
+        return;
+      }
+      stopPlayback();
+      const a = new Audio(url);
+      player.current = a;
+      setPlayingUrl(url);
+      const tick = () => {
+        if (player.current !== a) return;
+        if (a.duration && Number.isFinite(a.duration)) setProgress(Math.min(1, a.currentTime / a.duration));
+        raf.current = requestAnimationFrame(tick);
+      };
+      a.onended = stopPlayback;
+      a.onerror = stopPlayback;
+      a.play().then(() => (raf.current = requestAnimationFrame(tick)), stopPlayback);
+    },
+    [playingUrl, stopPlayback],
+  );
+
+  return {
+    isPlaying: (url: string | null | undefined) => !!url && playingUrl === url,
+    progress,
+    toggle,
+  };
+}
+
+/** m:ss, as the source's `clock()`. */
+export function clock(seconds: number | undefined): string {
+  const s = Math.max(0, Math.round(seconds ?? 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+```
 
 ### 6.5 App shell and styles
 
 #### `app/layout.tsx`  
-_39 lines_
+_48 lines_
 
 ```tsx
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Poppins } from "next/font/google";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -3366,6 +4660,13 @@ const geistSans = Geist({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+});
+
+// The Pandai DS face, used only by the AskPBot surfaces (app/pbot-host.css).
+const poppins = Poppins({
+  variable: "--font-poppins",
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
 });
 
 export const metadata: Metadata = {
@@ -3387,7 +4688,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      // `btn-gamefeel` is where the source DS stages its push-button motion
+      // tokens (press depth, release spring) — it sits on <html> there too.
+      className={`${geistSans.variable} ${geistMono.variable} ${poppins.variable} btn-gamefeel h-full antialiased`}
     >
       <body className="min-h-full">{children}</body>
     </html>
@@ -3450,7 +4753,7 @@ export default function EmbedDemo() {
 
       <div className="mt-8 flex flex-wrap items-center gap-3">
         <PBotLauncher />
-        <span className="text-muted text-sm">or press the panda, bottom-right</span>
+        <span className="text-muted text-sm">or tap PBot, bottom-right</span>
       </div>
 
       <div className="border-border bg-surface mt-12 rounded-2xl border p-5">
@@ -3482,10 +4785,14 @@ export default function EmbedDemo() {
 ```
 
 #### `app/globals.css`  
-_988 lines_
+_51 lines_
 
 ```css
 @import "tailwindcss";
+/* AskPBot: the source design system's own rules (generated), then this app's
+   additions. See scripts/pbot-design/sync.mjs and app/pbot-host.css. */
+@import "./pbot.css";
+@import "./pbot-host.css";
 
 /* ===========================================================================
    Host page tokens (the demo site behind the panel)
@@ -3532,954 +4839,2755 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
+```
 
+
+#### `app/pbot-host.css`  
+_156 lines_
+
+```css
 /* ===========================================================================
-   AskPBot panel
-   ---------------------------------------------------------------------------
-   Ported from the Pandai student-UI `.pbot-*` block. The source used design
-   tokens with literal fallbacks (`var(--azure-100, #d5edfb)`); those literals
-   are promoted to the `--pbot-*` variables below so this file is self-contained
-   and still one place to retheme.
+   AskPBot — what THIS app adds on top of the extracted source stylesheet.
 
-   The panel keeps its brand colours in dark mode rather than inverting. It is a
-   fixed-identity surface floating over a host app whose theme it does not
-   control, and a dark azure panel is a different product, not a dark variant.
+   app/pbot.css is generated from pandai.question.uiux and never hand-edited.
+   Everything here is one of two things, and each rule says which:
+     host   the source assumes the Pandai student app around it (its header,
+            its footer, Alpine's x-show) and this app has none of that;
+     ours   a part the source does not have — the phase label, the in-band
+            error, the character count, telemetry, a voice note's transcript.
+   Both surfaces keep their brand colours in dark mode; see README.
    =========================================================================== */
-:root {
-  --pbot-primary: #00cc85;
-  --pbot-primary-strong: #00a86d;
-  --pbot-azure: #d5edfb;
-  --pbot-azure-glow: #30a9e5;
-  --pbot-border-info: #0071a2;
-  --pbot-white: #ffffff;
-  --pbot-green-subtle: #e8fbe8;
-  --pbot-bot-bubble: #eef7f2;
-  --pbot-line: #dfe7e3;
-  --pbot-heading: #17241e;
-  --pbot-body: #33413a;
-  --pbot-caption: #6b7a72;
-  --pbot-tertiary: #067a53;
-  --pbot-danger: #a8392b;
 
-  --pbot-xs: 8px;
-  --pbot-s: 12px;
-  --pbot-m: 16px;
-
-  --pbot-motion-base: 0.25s;
-  --pbot-motion-deck: 0.36s;
-  --pbot-ease-out: cubic-bezier(0.2, 0, 0.2, 1);
-  /* Slight overshoot — the "deal off a deck" feel. */
-  --pbot-ease-deck: cubic-bezier(0.2, 0.9, 0.25, 1.06);
+/* host — the DS face. The source sets it on <body>; here only PBot uses it, so
+   the /embed host page keeps its own type. */
+.pbot-web-shell,
+.pbot-panel,
+.pbot-modal,
+.home-pbot,
+.btn {
+  font-family: var(--font-poppins), "Poppins", ui-sans-serif, system-ui, sans-serif;
 }
 
+/* host — the web page. The source sizes .pbot-web as `100dvh - 162px`, which is
+   its own header and footer subtracted; with neither here, the field fills the
+   viewport inside a 16px gutter (and the source's own mobile rules, which go to
+   auto height and stack, still win below 764px). The gutter is on a wrapper of
+   ours because the source's `.pbot-web-shell` is `display: contents`. */
+.pbot-page {
+  min-height: 100dvh;
+  padding: 16px;
+  background: #fff;
+}
+.pbot-web {
+  height: calc(100dvh - 32px);
+}
+@media (width < 764px) {
+  .pbot-page { padding: 8px; }
+  .pbot-web { height: auto; }
+}
+
+/* host — the scrim is x-show'd in the source; here it is always mounted and
+   fades on `is-open`. */
 .pbot-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 1190;
-  background: rgba(0, 0, 0, 0.35);
   opacity: 0;
   visibility: hidden;
-  transition:
-    opacity var(--pbot-motion-base) var(--pbot-ease-out),
-    visibility 0s linear var(--pbot-motion-base);
+  transition: opacity var(--motion-slow, 0.4s) var(--ease-out, ease), visibility 0s linear var(--motion-slow, 0.4s);
 }
 .pbot-scrim.is-open {
   opacity: 1;
   visibility: visible;
-  transition:
-    opacity var(--pbot-motion-base) var(--pbot-ease-out),
-    visibility 0s;
+  transition: opacity var(--motion-slow, 0.4s) var(--ease-out, ease), visibility 0s;
 }
 
-.pbot-panel {
-  position: fixed;
-  top: 15px;
-  bottom: 15px;
-  right: 0;
-  z-index: 1200;
-  display: flex;
-  flex-direction: column;
-  width: min(412px, 100vw);
-  background: var(--pbot-azure);
-  border: 1px solid var(--pbot-border-info);
-  border-top-left-radius: 24px;
-  border-bottom-left-radius: 24px;
-  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.18);
-  overflow: hidden;
-  /* Slide from the docked edge with a scaleX overshoot. */
-  transform-origin: right;
-  translate: 100% 0;
-  scale: 1.06 1;
-  visibility: hidden;
-  transition:
-    translate var(--pbot-motion-deck) cubic-bezier(0.4, 0, 1, 1),
-    scale var(--pbot-motion-deck) var(--pbot-ease-deck),
-    visibility 0s linear var(--pbot-motion-deck);
-}
-.pbot-panel.is-open {
-  translate: 0 0;
-  scale: 1 1;
-  visibility: visible;
-  transition:
-    translate var(--pbot-motion-deck) var(--pbot-ease-deck),
-    scale var(--pbot-motion-deck) var(--pbot-ease-deck),
-    visibility 0s;
+/* host — the source's deck is a TOGGLE between Ask PBot and Math Drill. With
+   Math Drill dropped it is one card and not a control, so it does not shuffle
+   on hover or press. */
+.pbot-deck--solo { cursor: default; }
+.pbot-deck--solo:hover .pbot-deck__card.is-front,
+.pbot-deck--solo:active .pbot-deck__card.is-front {
+  transform: translateY(6px) scale(1);
 }
 
-.pbot-panel--left {
-  right: auto;
-  left: 0;
-  border-left: 0;
-  border-right: 1px solid var(--pbot-border-info);
-  border-radius: 0 24px 24px 0;
-  box-shadow: 12px 0 40px rgba(0, 0, 0, 0.18);
-  transform-origin: left;
-  translate: -100% 0;
-}
-.pbot-panel--left.is-open {
-  translate: 0 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .pbot-panel,
-  .pbot-panel.is-open {
-    scale: 1 1;
-    transition:
-      translate 0.01s linear,
-      visibility 0s;
-  }
-}
-
-/* The azure backdrop circle behind the header (bg-ellipse.svg, #30A9E5). */
-.pbot-panel__glow {
-  position: absolute;
-  top: -202px;
-  left: -75px;
-  width: 562px;
-  height: 562px;
-  z-index: 0;
-  pointer-events: none;
-  background: radial-gradient(
-    circle at center,
-    var(--pbot-azure-glow) 0%,
-    color-mix(in srgb, var(--pbot-azure-glow) 55%, transparent) 45%,
-    transparent 70%
-  );
-}
-
-.pbot-panel__head {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--pbot-m);
-}
-.pbot-panel__title {
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 28px;
-  color: var(--pbot-white);
-}
-.pbot-panel__close {
-  position: absolute;
-  right: var(--pbot-s);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 0;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
-  color: var(--pbot-white);
-  cursor: pointer;
-  transition: background var(--pbot-motion-base) var(--pbot-ease-out);
-}
-.pbot-panel__close:hover {
-  background: rgba(255, 255, 255, 0.3);
-}
-
-.pbot-feature {
-  position: relative;
-  z-index: 1;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: 0 var(--pbot-m) var(--pbot-m);
-  overflow: hidden;
-}
-
-/* --- Home: new chat + history --------------------------------------------- */
-
-.pbot-home {
-  display: flex;
-  flex-direction: column;
-  gap: var(--pbot-s);
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.pbot-newchat {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--pbot-xs);
-  width: 100%;
-  padding: 12px var(--pbot-m);
-  border: 1px solid var(--pbot-primary-strong);
-  border-radius: 999px;
-  background: var(--pbot-primary);
-  color: var(--pbot-white);
-  font-size: 15px;
-  font-weight: 700;
-  cursor: pointer;
-  transition:
-    transform var(--pbot-motion-base) var(--pbot-ease-out),
-    filter var(--pbot-motion-base) var(--pbot-ease-out);
-}
-.pbot-newchat:hover {
-  filter: brightness(1.05);
-  transform: translateY(-1px);
-}
-.pbot-newchat__chev {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.25);
-}
-
-.pbot-history {
-  display: flex;
-  flex-direction: column;
-  gap: var(--pbot-xs);
-  padding: var(--pbot-m);
-  background: var(--pbot-green-subtle);
-  border: 1px solid var(--pbot-primary);
-  border-radius: 24px;
-}
-.pbot-history__empty {
-  padding: var(--pbot-s) 0;
-  font-size: 13px;
-  text-align: center;
-  color: var(--pbot-caption);
-}
-.pbot-history__group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--pbot-xs);
-}
-.pbot-history__label {
-  padding-top: var(--pbot-xs);
-  font-size: 14px;
-  font-weight: 500;
-  text-align: center;
-  color: var(--pbot-tertiary);
-}
-.pbot-history__item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: var(--pbot-xs) var(--pbot-s) var(--pbot-xs) var(--pbot-m);
-  background: var(--pbot-white);
-  border: 1px solid var(--pbot-line);
-  border-radius: 18px;
-}
-.pbot-history__open {
-  flex: 1;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--pbot-body);
-  text-align: left;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.pbot-history__menu {
-  display: inline-flex;
-  flex-shrink: 0;
-  padding: 4px;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  color: var(--pbot-caption);
-  cursor: pointer;
-}
-.pbot-history__menu:hover {
-  color: var(--pbot-body);
-}
-.pbot-history__menu.is-danger {
-  color: var(--pbot-danger);
-  background: color-mix(in srgb, var(--pbot-danger) 10%, transparent);
-}
-
-/* --- Chat ----------------------------------------------------------------- */
-
-.pbot-conv {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  height: 100%;
-  background: var(--pbot-white);
-  border: 1px solid var(--pbot-line);
-  border-radius: 24px;
-  overflow: hidden;
-}
-.pbot-conv__head {
-  display: flex;
-  align-items: center;
-  gap: var(--pbot-s);
-  padding: var(--pbot-s) var(--pbot-m);
-  background: var(--pbot-green-subtle);
-}
-.pbot-back {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 10px 4px 6px;
-  border: 1px solid var(--pbot-primary);
-  border-radius: 999px;
-  background: var(--pbot-white);
-  color: var(--pbot-tertiary);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.pbot-back:hover {
-  background: var(--pbot-green-subtle);
-}
-.pbot-conv__title {
-  flex: 1;
-  min-width: 0;
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--pbot-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pbot-conv__log {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: var(--pbot-m);
-  padding: var(--pbot-m);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.pbot-turn {
-  display: flex;
-  gap: var(--pbot-xs);
-  max-width: 92%;
-}
-.pbot-turn--bot {
-  align-self: flex-start;
-}
-.pbot-turn--user {
-  align-self: flex-end;
-  flex-direction: row-reverse;
-}
-.pbot-turn__avatar {
-  flex-shrink: 0;
-}
-.pbot-avatar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--pbot-green-subtle);
-  line-height: 1;
-}
-.pbot-turn__col {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-.pbot-turn--user .pbot-turn__col {
-  align-items: flex-end;
-}
-
-.pbot-bubble {
-  padding: var(--pbot-xs) var(--pbot-s);
-  font-size: 14px;
-  line-height: 20px;
-  border-radius: 14px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-/* Asymmetric corners point each bubble at its speaker. */
-.pbot-turn--bot .pbot-bubble {
-  background: var(--pbot-bot-bubble);
-  color: var(--pbot-heading);
-  border-top-left-radius: 4px;
-}
-.pbot-turn--user .pbot-bubble {
-  background: var(--pbot-primary);
-  color: var(--pbot-white);
-  border-top-right-radius: 4px;
-}
-
-.pbot-turn__image {
-  max-width: 220px;
-  max-height: 220px;
-  border-radius: 14px;
-  border: 1px solid var(--pbot-line);
-  object-fit: cover;
-}
-.pbot-turn__imagenote,
-.pbot-turn__phase {
-  font-size: 11px;
-  color: var(--pbot-caption);
-}
-
-.pbot-turn__acts {
-  display: flex;
-  gap: 2px;
-}
-.pbot-turn__acts button {
-  display: inline-flex;
-  padding: 4px;
-  border: 0;
-  border-radius: 6px;
-  background: none;
-  color: var(--pbot-caption);
-  cursor: pointer;
-  transition: color var(--pbot-motion-base) var(--pbot-ease-out);
-}
-.pbot-turn__acts button:hover {
-  color: var(--pbot-tertiary);
-}
-.pbot-turn__acts button.is-active {
-  color: var(--pbot-primary-strong);
-}
-
-.pbot-bubble--typing {
-  display: inline-flex;
-  gap: 4px;
-  align-items: center;
-  background: var(--pbot-bot-bubble);
-  border-top-left-radius: 4px;
-}
-.pbot-bubble--typing span {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--pbot-caption);
-  opacity: 0.3;
-}
+/* host — Alpine's x-transition gave the modal card its entrance. */
 @media (prefers-reduced-motion: no-preference) {
-  .pbot-bubble--typing span {
-    animation: pbot-typing 1s var(--pbot-ease-out) infinite;
-  }
-  .pbot-bubble--typing span:nth-child(2) {
-    animation-delay: 0.15s;
-  }
-  .pbot-bubble--typing span:nth-child(3) {
-    animation-delay: 0.3s;
-  }
-  @keyframes pbot-typing {
-    0%,
-    60%,
-    100% {
-      opacity: 0.3;
-      transform: translateY(0);
-    }
-    30% {
-      opacity: 1;
-      transform: translateY(-3px);
-    }
-  }
+  .pbot-modal__card { animation: pbotHostModalIn 0.28s var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)); }
+  .pbot-modal__scrim { animation: pbotHostFade 0.2s ease-out; }
+}
+@keyframes pbotHostModalIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.94); }
+}
+@keyframes pbotHostFade {
+  from { opacity: 0; }
 }
 
-.pbot-error {
-  padding: var(--pbot-xs) var(--pbot-s);
-  border: 1px solid color-mix(in srgb, var(--pbot-danger) 30%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--pbot-danger) 8%, transparent);
-  color: var(--pbot-danger);
-  font-size: 13px;
+/* host — the top bar's title is an <h1> on the hero and an editable <p> in a
+   chat; neither may pick up a default margin, and a long name ellipsises. */
+.pbot-topbar__title {
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
-/* --- Compose -------------------------------------------------------------- */
-
-.pbot-attach {
-  display: flex;
-  align-items: center;
-  gap: var(--pbot-xs);
-  padding: var(--pbot-xs) var(--pbot-m) 0;
-}
-.pbot-attach__chip {
-  position: relative;
-  display: inline-flex;
-}
-.pbot-attach__chip img {
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-  border: 1px solid var(--pbot-line);
-  object-fit: cover;
-}
-.pbot-attach__chip button {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border: 0;
-  border-radius: 50%;
-  background: var(--pbot-heading);
-  color: var(--pbot-white);
-  cursor: pointer;
-}
-.pbot-attach__error {
-  font-size: 12px;
-  color: var(--pbot-danger);
-}
-
-.pbot-compose {
-  display: flex;
-  align-items: flex-end;
-  gap: var(--pbot-xs);
-  padding: var(--pbot-s) var(--pbot-m) 4px;
-  border-top: 1px solid var(--pbot-line);
-}
-.pbot-compose__field {
-  flex: 1;
-  min-width: 0;
-  min-height: 40px;
-  max-height: 120px;
-  padding: 10px var(--pbot-m);
-  border: 1px solid var(--pbot-line);
-  border-radius: 20px;
-  font: inherit;
-  font-size: 14px;
-  line-height: 20px;
-  color: var(--pbot-heading);
-  background: var(--pbot-white);
-  resize: none;
-}
-.pbot-compose__field:focus {
+.pbot-topbar__title[contenteditable] {
+  padding: 2px 10px;
+  border-radius: 999px;
   outline: none;
-  border-color: var(--pbot-primary);
+  cursor: text;
 }
-.pbot-compose__field.is-over {
-  border-color: var(--pbot-danger);
-}
-.pbot-compose__send,
-.pbot-compose__extra {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  cursor: pointer;
-}
-.pbot-compose__send {
-  border: 1px solid var(--pbot-primary-strong);
-  background: var(--pbot-primary);
-  color: var(--pbot-white);
-}
-.pbot-compose__send:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-.pbot-compose__extra {
-  border: 1px solid var(--pbot-primary);
-  background: var(--pbot-white);
-  color: var(--pbot-tertiary);
-}
-.pbot-compose__extra:disabled {
-  opacity: 0.5;
-  cursor: default;
+.pbot-topbar__title[contenteditable]:hover { background: rgba(255, 255, 255, 0.1); }
+.pbot-topbar__title[contenteditable]:focus {
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5);
+  text-overflow: clip;
 }
 
+/* ours — the open chat's row in the web rail. */
+.pbot-history__item.is-active .pbot-history__open { font-weight: 600; }
+
+/* ours — the phase under the typing dots: thinking / checking the time / writing. */
+.pbot-turn__phase {
+  margin: calc(-1 * var(--spacing-space-xs, 8px)) 0 0 calc(var(--pbot-avatar, 50px) + var(--spacing-space-xs, 8px));
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--space-ink-dim, rgba(234, 243, 255, 0.7));
+}
+
+/* ours — a stream that failed after it opened (CLAUDE.md: the in-band path). */
+.pbot-error {
+  align-self: stretch;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 138, 138, 0.55);
+  border-radius: 12px;
+  background: rgba(120, 10, 30, 0.35);
+  color: #ffe1e1;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+/* ours — the input limit, shown from 80% of it. */
 .pbot-count {
-  padding: 2px var(--pbot-m) 0;
+  margin: 0;
+  padding: 0 var(--spacing-space-m, 16px);
   font-size: 11px;
   text-align: right;
-  color: var(--pbot-caption);
+  color: var(--space-disclaimer, rgba(234, 243, 255, 0.7));
 }
-.pbot-count.is-over {
-  color: var(--pbot-danger);
-  font-weight: 600;
+.pbot-count.is-over { color: #ffb3b3; font-weight: 600; }
+.pbot-web__hero .pbot-count { padding: 0; }
+
+/* ours — per-turn tokens and latency, after the disclaimer. */
+.pbot-telemetry { opacity: 0.75; font-variant-numeric: tabular-nums; }
+
+/* ours — what speech recognition heard, which is what PBot actually received.
+   It wraps under the play · waveform · time row. */
+.pbot-voicemsg { flex-wrap: wrap; }
+.pbot-voicemsg__transcript {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 18px;
+  font-style: italic;
+  opacity: 0.85;
 }
 
-.pbot-disclaimer {
-  padding: 0 var(--pbot-m) var(--pbot-s);
-  font-size: 11px;
-  text-align: center;
-  color: var(--pbot-caption);
-}
-.pbot-telemetry {
-  font-variant-numeric: tabular-nums;
-}
-
-@media (max-width: 480px) {
-  .pbot-panel {
-    top: 0;
-    bottom: 0;
-    width: 100vw;
-    border-radius: 0;
-  }
-}
-
-/* --- Fixed mascot --------------------------------------------------------- */
-
-.home-pbot {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 40;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 0;
-  border: 0;
-  background: none;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  transition: transform var(--pbot-motion-base) var(--pbot-ease-out);
-}
-.home-pbot:hover {
-  transform: scale(1.06);
-}
-.home-pbot__bubble {
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: var(--pbot-white);
-  border: 1px solid var(--pbot-primary);
-  color: var(--pbot-tertiary);
+/* ours — an image sent in an earlier session; history never stores the bytes. */
+.pbot-imgmsg__gone {
+  display: block;
+  padding: 6px 2px;
   font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
-}
-.home-pbot__face {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 96px;
-  height: 96px;
-  border-radius: 50%;
-  background: var(--pbot-green-subtle);
-  border: 2px solid var(--pbot-primary);
-  font-size: 52px;
-  line-height: 1;
-  box-shadow: 0 8px 24px rgba(0, 122, 90, 0.25);
-}
-@media (max-width: 640px) {
-  .home-pbot__bubble {
-    display: none;
-  }
-  .home-pbot__face {
-    width: 68px;
-    height: 68px;
-    font-size: 36px;
-  }
+  font-style: italic;
+  opacity: 0.75;
 }
 
-/* ===========================================================================
-   AskPBot web layout
-   ---------------------------------------------------------------------------
-   The two-column surface the product ships as: a persistent sidebar beside a
-   main column that holds either the hero or the open conversation. Ported from
-   the source's `.pbot-web` block, which shares this stylesheet with the docked
-   panel above — the conversation, turn, and composer rules are reused verbatim
-   by both, so only the shell is new here.
-   =========================================================================== */
-
-.pbot-web {
-  display: grid;
-  grid-template-columns: minmax(248px, 316px) minmax(0, 1fr);
-  gap: var(--pbot-m);
-  width: 100%;
-  max-width: 1320px;
-  height: calc(100dvh - 32px);
-  min-height: 560px;
-  margin: 0 auto;
-  padding: var(--pbot-m);
-}
-
-.pbot-web__side {
-  display: flex;
-  flex-direction: column;
-  gap: var(--pbot-s);
-  min-height: 0;
-  padding: var(--pbot-m);
-  background: var(--pbot-white);
-  border: 1px solid var(--pbot-line);
-  border-radius: 24px;
-}
-
-.pbot-web__brand {
-  display: flex;
-  align-items: center;
-  gap: var(--pbot-xs);
-}
-.pbot-web__brand-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  background: var(--pbot-green-subtle);
-  font-size: 20px;
-  line-height: 1;
-}
-.pbot-web__brand-name {
-  margin-inline-end: auto;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--pbot-heading);
-}
-
-/* The history list scrolls; the brand and the new-chat button do not. */
-.pbot-web__hist {
-  display: flex;
-  flex-direction: column;
-  gap: var(--pbot-xs);
-  flex: 1;
-  min-height: 0;
-  padding: var(--pbot-s);
-  background: var(--pbot-green-subtle);
-  border: 1px solid var(--pbot-primary);
-  border-radius: 20px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.pbot-web__main {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  background: var(--pbot-azure);
-  border: 1px solid var(--pbot-border-info);
-  border-radius: 24px;
-  overflow: hidden;
-}
-
-/* Same ellipse as the panel's, recentred for a wide column. */
-.pbot-web__glow {
-  top: 46%;
-  left: 50%;
-  width: 560px;
-  height: 560px;
-  opacity: 0.5;
-  filter: blur(10px);
-  transform: translate(-50%, -50%);
-}
-
-.pbot-web__hero {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 100%;
-  padding: var(--pbot-m) 20px;
-  text-align: center;
-  overflow-y: auto;
-}
-.pbot-web__hero-title {
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--pbot-heading);
-}
-.pbot-web__hero-sub {
-  max-width: 46ch;
-  font-size: 14px;
-  line-height: 22px;
-  color: var(--pbot-body);
-}
-
-/* Hero chips wrap and centre; the in-chat ones stack (see .pbot-suggest). */
-.pbot-web__prompts {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: var(--pbot-xs);
-  max-width: 640px;
-  margin-top: var(--pbot-s);
-}
-
-/* The conversation fills the column edge to edge — the main panel already
-   supplies the frame, so the chat's own border and radius would double it. */
-.pbot-web__conv {
-  position: relative;
-  z-index: 1;
-  height: 100%;
-  min-height: 0;
-}
-.pbot-web__conv .pbot-conv {
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-}
-
-@media (max-width: 860px) {
-  .pbot-web {
-    grid-template-columns: minmax(0, 1fr);
-    height: auto;
-    min-height: 100dvh;
-  }
-  .pbot-web__side {
-    max-height: 40dvh;
-  }
-  .pbot-web__main {
-    min-height: 60dvh;
-  }
-}
-
-/* --- Starter prompt chips ------------------------------------------------- */
-
-.pbot-suggest {
-  display: flex;
-  flex-direction: column;
-  gap: var(--pbot-xs);
-  margin-top: auto;
-  padding-top: var(--pbot-m);
-}
-.pbot-suggest__chip {
-  padding: var(--pbot-xs) var(--pbot-m);
-  border: 1px solid var(--pbot-primary);
-  border-radius: 999px;
-  background: var(--pbot-white);
-  color: var(--pbot-tertiary);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background var(--pbot-motion-base) var(--pbot-ease-out),
-    transform var(--pbot-motion-base) var(--pbot-ease-out);
-}
-.pbot-suggest__chip:hover {
-  background: var(--pbot-green-subtle);
-  transform: translateY(-1px);
-}
-
-/* --- Hero podium ---------------------------------------------------------- */
-
-.pbot-podium {
-  position: relative;
-  flex: none;
-  width: 200px;
-  height: 176px;
-}
-.pbot-podium__base,
-.pbot-podium__stage {
-  position: absolute;
-  left: 50%;
-  border-radius: 50%;
-  transform: translateX(-50%);
-}
-.pbot-podium__base {
-  bottom: 0;
-  width: 190px;
-  height: 46px;
-  background: color-mix(in srgb, var(--pbot-border-info) 22%, transparent);
-}
-.pbot-podium__stage {
-  bottom: 26px;
-  width: 150px;
-  height: 34px;
-  background: color-mix(in srgb, var(--pbot-white) 55%, transparent);
-}
-.pbot-podium__mascot {
-  position: absolute;
-  bottom: 44px;
-  left: 50%;
-  z-index: 2;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 150px;
-  height: 150px;
-  pointer-events: none;
-  transform: translateX(-50%);
-}
-.pbot-podium__face {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  background: var(--pbot-white);
-  border: 2px solid var(--pbot-primary);
-  font-size: 74px;
-  line-height: 1;
-  box-shadow: 0 10px 28px rgba(0, 122, 90, 0.22);
-}
-
-/* The source rises the mascot onto the podium when the surface appears. */
-@media (prefers-reduced-motion: no-preference) {
-  .pbot-podium__mascot {
-    animation: pbotPodiumRise 0.55s var(--pbot-ease-deck) 0.12s both;
-  }
-  @keyframes pbotPodiumRise {
-    from {
-      opacity: 0;
-      transform: translate(-50%, 48px);
-    }
-    to {
-      opacity: 1;
-      transform: translateX(-50%);
-    }
-  }
-}
-
-/* --- Shared additions ----------------------------------------------------- */
-
-/* Marks the conversation open in the main column. Panel has no equivalent —
-   there, opening a conversation replaces the list entirely. */
-.pbot-history__item.is-active {
-  border-color: var(--pbot-primary);
-  background: color-mix(in srgb, var(--pbot-primary) 8%, var(--pbot-white));
-}
-
-/* The composer stops pretending to be a pill once it is several lines tall. */
-.pbot-compose__field {
-  transition: border-radius var(--pbot-motion-base) var(--pbot-ease-out);
-}
-.pbot-compose__field.is-grown-1 {
-  border-radius: 18px;
-}
-.pbot-compose__field.is-grown-2 {
-  border-radius: 14px;
-}
+/* ours — thumbs-up on a reply already marked helpful. The source only has a
+   thumbs-down, which opens a report. */
+.pbot-turn__acts button.is-rated { color: var(--text-primary-default, #00cc85); }
 ```
 
+`app/pbot.css` below is **generated** by `npm run design:sync` from `pandai.question.uiux` (§6.7). It is inlined because a receiver without that checkout cannot regenerate it.
+
+#### `app/pbot.css`  
+_2572 lines_
+
+```css
+/* GENERATED by scripts/pbot-design/sync.mjs from pandai.question.uiux@42a250e. Do not edit:
+   change the script (or app/pbot-host.css) and re-run it. */
+
+:root {
+    --accents-butter-on-color-hover: #fffff4;
+    --azure-100: #d5edfb;
+    --border-default: #00cc85;
+    --border-disabled-disabled: #bfbfbf;
+    --border-general-default: #bfbfbf;
+    --border-general-default-tertiary: #e5e5e5;
+    --border-informative-default-subtle-hover: #b3e4f9;
+    --border-informative-focus: #0071a2;
+    --border-on-color: #ffffff;
+    --border-primary-default: #00cc85;
+    --border-primary-default-hover: #66e0b6;
+    --border-primary-focus: #00a36a;
+    --border-secondary-focus: #70bc6f;
+    --border-success-default: #18c964;
+    --border-warning-default: #ff4c51;
+    --border-warning-focus: #b23539;
+    --border-width-xs: 1px;
+    --corner-radius-corner-2xl: 18px;
+    --corner-radius-corner-4xl: 24px;
+    --corner-radius-corner-5xl: 54px;
+    --corner-radius-corner-lg: 12px;
+    --corner-radius-corner-md: 8px;
+    --corner-radius-corner-pill: 999px;
+    --corner-radius-corner-rounded: 60px;
+    --corner-radius-corner-xl: 16px;
+    --ease-deck: cubic-bezier(0.5, 1.6, 0.6, 1);
+    --ease-out: cubic-bezier(0.2, 0, 0.2, 1);
+    --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+    --font-family: 'Poppins', sans-serif;
+    --icon-disabled-default: #bfbfbf;
+    --icon-primary-default: #00cc85;
+    --icon-primary-on-color: #e1f9ea;
+    --icon-warning-default: #ff4c51;
+    --icon-warning-focus: #b23539;
+    --icon-warning-on-color: #ffffff;
+    --motion-base: 0.2s;
+    --motion-fast: 0.12s;
+    --motion-slow: 0.3s;
+    --spacing-space-2xl: 28px;
+    --spacing-space-3xl: 60px;
+    --spacing-space-3xs: 2px;
+    --spacing-space-l: 20px;
+    --spacing-space-m: 16px;
+    --spacing-space-s: 12px;
+    --spacing-space-xl: 24px;
+    --spacing-space-xs: 8px;
+    --spacing-space-xxs: 4px;
+    --surface-disabled-on-color: #e5e5e5;
+    --surface-disabled-primary: #f2f2f2;
+    --surface-general-default: #ffffff;
+    --surface-general-default-alpha: rgba(255, 255, 255, 0.5);
+    --surface-general-default-secondary: #ffffff;
+    --surface-general-default-tertiary: #ffffff;
+    --surface-primary-default: #00cc85;
+    --surface-primary-default-subtle: #e1f9ea;
+    --surface-primary-default-subtle-hover: #99ebce;
+    --surface-primary-focus: #00a36a;
+    --surface-secondary-default: #b5f291;
+    --surface-secondary-default-hover: #e8fbe8;
+    --surface-secondary-default-subtle: #f6fef6;
+    --surface-secondary-default-subtle-hover: #d1f7d1;
+    --surface-warning-default: #ff4c51;
+    --surface-warning-default-subtle-hover: #ffcacb;
+    --surface-warning-focus: #b23539;
+    --text-default-body: #666666;
+    --text-default-caption: #999999;
+    --text-default-heading: #4d4d4d;
+    --text-disabled-default: #bfbfbf;
+    --text-on-color-caption: #ffffff;
+    --text-on-color-heading: #ffffff;
+    --text-primary-default: #00cc85;
+    --text-primary-focus: #00a36a;
+    --text-secondary-focus: #548d53;
+    --text-tertiary-default: #00564c;
+    --text-warning-default: #ff4c51;
+    --type-b1: 14px;
+    --type-b1-lh: 20px;
+    --type-b2: 14px;
+    --type-b2-lh: 20px;
+    --type-b5: 12px;
+    --type-b5-lh: 18px;
+    --type-b6: 12px;
+    --type-b8: 10px;
+    --type-b8-lh: 12px;
+    --type-c2: 10px;
+    --type-c2-lh: 12px;
+    --type-t1: 18px;
+    --type-t1-lh: 28px;
+    --type-t2: 18px;
+    --type-t2-lh: 28px;
+    --type-t4: 16px;
+    --type-t4-lh: 24px;
+}
+
+
+/* ── resources/css/pandai/components.css ── */
+
+.btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 40px;
+    padding: 4px 12px 8px;
+    border: 1px solid var(--btn-border, transparent);
+    border-radius: var(--corner-radius-corner-rounded);
+    background: var(--btn-bg, transparent);
+    color: var(--btn-text);
+    font-family: var(--font-family);
+    font-size: var(--type-b2);
+    font-weight: 600;
+    line-height: var(--type-b2-lh);
+    white-space: nowrap;
+    text-decoration: none;
+    cursor: pointer;
+    touch-action: manipulation;
+    user-select: none;
+    transition:
+        background var(--motion-base) var(--ease-out),
+        border-color var(--motion-base) var(--ease-out),
+        box-shadow var(--motion-base) var(--ease-out),
+        color var(--motion-base) var(--ease-out);
+}
+.btn:focus-visible {
+    outline: 3px solid var(--surface-primary-default-subtle-hover);
+    outline-offset: 2px;
+}
+.btn__label { padding: 0 8px; }
+.btn__disc {
+    display: grid;
+    place-items: center;
+    place-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 4px;
+    border-radius: 50%;
+    background: var(--btn-disc, transparent);
+    color: var(--btn-disc-icon, currentColor);
+    flex: none;
+}
+.btn__disc svg { display: block; width: 16px; height: 16px; }
+.btn--m { height: 32px; padding: 4px 8px 8px; font-size: var(--type-b5); line-height: var(--type-b5-lh); }
+.btn--m .btn__disc { width: 20px; height: 20px; padding: 2px; }
+.btn--m .btn__label { padding: 0 4px; }
+.btn--block { width: 100%; }
+.btn--primary {
+    --btn-bg: var(--surface-primary-default);
+    --btn-border: var(--border-primary-focus);
+    --btn-text: var(--text-on-color-heading);
+    --btn-disc: var(--surface-primary-default-subtle-hover);
+    --btn-disc-icon: var(--border-primary-focus);
+}
+.btn--secondary {
+    --btn-bg: var(--surface-general-default-secondary);
+    --btn-border: var(--border-primary-default);
+    --btn-text: var(--text-primary-default);
+    --btn-disc: var(--surface-general-default-secondary);
+    --btn-disc-icon: var(--text-primary-default);
+}
+.btn--danger {
+    --btn-bg: var(--surface-warning-default);
+    --btn-border: var(--border-warning-focus);
+    --btn-text: var(--text-on-color-heading);
+    --btn-disc: var(--surface-warning-default-subtle-hover);
+    --btn-disc-icon: var(--text-warning-default);
+}
+.btn.btn--danger:hover:not(:disabled):not(.is-disabled):not(.is-active) {
+    --btn-bg: var(--surface-warning-default);
+    --btn-border: var(--border-warning-focus);
+    --btn-text: var(--text-on-color-heading);
+    --btn-disc: var(--surface-warning-default-subtle-hover);
+    --btn-disc-icon: var(--text-warning-default);
+}
+.btn.btn--danger:active:not(:disabled):not(.is-disabled):not(.is-active) {
+    --btn-bg: var(--surface-warning-focus);
+    --btn-border: var(--border-warning-default);
+    --btn-text: var(--text-warning-default);
+    --btn-disc: var(--surface-warning-default);
+    --btn-disc-icon: var(--icon-warning-focus);
+}
+.btn.btn--danger.is-active {
+    --btn-bg: var(--surface-warning-default);
+    --btn-border: var(--border-warning-focus);
+    --btn-text: var(--text-on-color-heading);
+    --btn-disc: var(--surface-warning-default-subtle-hover);
+    --btn-disc-icon: var(--text-warning-default);
+}
+.btn.btn--danger:disabled,
+.btn.btn--danger.is-disabled {
+    --btn-bg: var(--surface-disabled-primary);
+    --btn-border: var(--border-disabled-disabled);
+    --btn-text: var(--text-disabled-default);
+    --btn-disc: var(--surface-disabled-on-color);
+    --btn-disc-icon: var(--icon-disabled-default);
+    cursor: not-allowed;
+}
+.btn--secondary .btn__disc {
+    box-sizing: border-box;
+    border: 1px solid var(--btn-disc-icon);
+}
+.btn--primary,
+.btn--secondary,
+.btn--danger {
+    border-radius: var(--corner-radius-corner-5xl) var(--corner-radius-corner-5xl) var(--corner-radius-corner-rounded) var(--corner-radius-corner-rounded);
+}
+.btn--primary:not(:has(.btn__face)),
+.btn--secondary:not(:has(.btn__face)),
+.btn--danger:not(:has(.btn__face)) {
+    box-shadow: inset 0 -3px 0 0 var(--btn-border);
+}
+.btn--primary:not(:has(.btn__face)):active:not(:disabled):not(.is-disabled),
+.btn--secondary:not(:has(.btn__face)):active:not(:disabled):not(.is-disabled),
+.btn--danger:not(:has(.btn__face)):active:not(:disabled):not(.is-disabled),
+.btn--primary:not(:has(.btn__face)).is-active,
+.btn--secondary:not(:has(.btn__face)).is-active,
+.btn--danger:not(:has(.btn__face)).is-active,
+.btn--primary:not(:has(.btn__face)):disabled,
+.btn--secondary:not(:has(.btn__face)):disabled,
+.btn--danger:not(:has(.btn__face)):disabled,
+.btn--primary:not(:has(.btn__face)).is-disabled,
+.btn--secondary:not(:has(.btn__face)).is-disabled,
+.btn--danger:not(:has(.btn__face)).is-disabled {
+    box-shadow: none;
+    padding: 8px 12px 8px;
+}
+.btn:hover:not(:disabled):not(.is-disabled):not(.is-active) {
+    --btn-bg: var(--surface-secondary-default);
+    --btn-border: var(--border-secondary-focus);
+    --btn-text: var(--text-secondary-focus);
+    --btn-disc: var(--surface-secondary-default-subtle);
+    --btn-disc-icon: var(--border-secondary-focus);
+}
+.btn--secondary:hover:not(:disabled):not(.is-disabled):not(.is-active) {
+    --btn-disc: var(--surface-secondary-default);
+}
+.btn:active:not(:disabled):not(.is-disabled):not(.is-active) {
+    --btn-bg: var(--surface-primary-focus);
+    --btn-border: var(--border-primary-default);
+    --btn-text: var(--text-primary-default);
+    --btn-disc: var(--surface-primary-default);
+    --btn-disc-icon: var(--border-primary-focus);
+}
+.btn--secondary:active:not(:disabled):not(.is-disabled) {
+    --btn-disc: var(--surface-primary-focus);
+    --btn-disc-icon: var(--text-primary-default);
+}
+.btn.is-active {
+    --btn-bg: var(--surface-primary-default);
+    --btn-border: var(--border-primary-focus);
+    --btn-text: var(--text-on-color-heading);
+    --btn-disc: var(--surface-primary-default-subtle-hover);
+    --btn-disc-icon: var(--border-primary-focus);
+}
+.btn:disabled,
+.btn.is-disabled {
+    --btn-bg: var(--surface-disabled-primary);
+    --btn-border: var(--border-disabled-disabled);
+    --btn-text: var(--border-disabled-disabled);
+    --btn-disc: var(--border-general-default-tertiary);
+    --btn-disc-icon: var(--border-disabled-disabled);
+    cursor: default;
+}
+.btn:has(.btn__face) {
+    padding: 0;
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+    overflow: visible;
+}
+.btn:has(.btn__face):active,
+.btn:has(.btn__face).is-active,
+.btn:has(.btn__face):disabled,
+.btn:has(.btn__face).is-disabled { padding: 0; }
+.btn:has(.btn__face)::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    background: var(--btn-border);
+    transition: background var(--motion-fast) var(--ease-out);
+    pointer-events: none;
+}
+.btn:has(.btn__face):active:not(:disabled):not(.is-disabled)::before,
+.btn:has(.btn__face):disabled::before,
+.btn:has(.btn__face).is-disabled::before {
+    background: transparent;
+}
+.btn:has(.btn__face) .btn__face {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-grow: 1;
+    height: 40px;
+    box-sizing: border-box;
+    padding: 8px 12px;
+    border: 1px solid var(--btn-border);
+    border-radius: inherit;
+    background: var(--btn-bg);
+    color: var(--btn-text);
+    transform: translateY(-3px);
+    transition:
+        background var(--motion-base) var(--ease-out),
+        border-color var(--motion-base) var(--ease-out),
+        color var(--motion-base) var(--ease-out),
+        transform var(--motion-fast) var(--ease-out);
+}
+.btn--m:has(.btn__face) .btn__face { height: 32px; padding: 2px 8px; }
+.btn--block:has(.btn__face) .btn__face { width: 100%; }
+.btn:has(.btn__face):active:not(:disabled):not(.is-disabled) .btn__face {
+    transform: translateY(0);
+    animation: none;
+}
+.btn:has(.btn__face):disabled .btn__face,
+.btn:has(.btn__face).is-disabled .btn__face {
+    transform: translateY(0);
+}
+.btn:has(.btn__face):hover:not(:disabled):not(.is-disabled):not(:active):not(.is-active):not(.is-loading) .btn__face {
+    transform: translateY(-6px);
+}
+.btn:has(.btn__face).is-loading > .btn__face { opacity: 1; }
+.btn:has(.btn__face).is-loading .btn__face > * { opacity: 0; }
+.btn:has(.btn__face).is-loading::after { z-index: 2; }
+@media (prefers-reduced-motion: reduce) {
+.btn:has(.btn__face).is-loading > .btn__face { opacity: 1; }
+.btn:has(.btn__face).is-loading .btn__face > * { opacity: 0.5; }
+}
+.btn:has(.btn__face).is-loading .btn__face {
+    transform: translateY(0);
+    animation: none;
+    transition: none;
+}
+.btn:has(.btn__face).is-loading::before {
+    background: transparent;
+}
+.icon-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex: none;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    border-radius: 50%;
+    color: var(--ib-glyph);
+    cursor: pointer;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+.icon-btn--l { width: 40px; height: 40px; }
+.icon-btn--s {
+    width: 24px;
+    height: 24px;
+    --ib-hover-lift-s: -4px;
+}
+.icon-btn:focus-visible {
+    outline: 3px solid var(--surface-primary-default-subtle-hover);
+    outline-offset: 2px;
+}
+.icon-btn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    background: var(--ib-border);
+    transition: background var(--motion-fast) var(--ease-out);
+    pointer-events: none;
+}
+.icon-btn:active:not(:disabled):not(.is-disabled)::before,
+.icon-btn:disabled::before,
+.icon-btn.is-disabled::before { background: transparent; }
+.icon-btn__face {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--ib-border);
+    border-radius: inherit;
+    background: var(--ib-bg);
+    color: var(--ib-glyph);
+    transform: translateY(-3px);
+    transition:
+        background var(--motion-base) var(--ease-out),
+        border-color var(--motion-base) var(--ease-out),
+        color var(--motion-base) var(--ease-out),
+        transform var(--motion-fast) var(--ease-out);
+}
+.icon-btn__face svg { display: block; width: 16px; height: 16px; }
+.icon-btn--l .icon-btn__face svg { width: 24px; height: 24px; }
+.icon-btn--s .icon-btn__face svg { width: 12px; height: 12px; }
+.icon-btn--primary {
+    --ib-bg: var(--surface-primary-default);
+    --ib-border: var(--border-primary-focus);
+    --ib-glyph: var(--icon-primary-on-color);
+}
+.icon-btn--secondary {
+    --ib-bg: var(--surface-general-default-secondary);
+    --ib-border: var(--border-primary-default);
+    --ib-glyph: var(--icon-primary-default);
+}
+.icon-btn--tertiary {
+    --ib-bg: transparent;
+    --ib-border: transparent;
+    --ib-glyph: var(--icon-primary-default);
+}
+.icon-btn--tertiary .icon-btn__face { transform: translateY(0); }
+.icon-btn:hover:not(:disabled):not(.is-disabled):not(.is-active) {
+    --ib-bg: var(--surface-secondary-default);
+    --ib-border: var(--border-secondary-focus);
+    --ib-glyph: var(--border-secondary-focus);
+}
+.icon-btn:hover:not(:disabled):not(.is-disabled):not(:active):not(.is-active):not(.is-loading) .icon-btn__face {
+    transform: translateY(-6px);
+}
+.icon-btn--s:hover:not(:disabled):not(.is-disabled):not(:active):not(.is-active):not(.is-loading) .icon-btn__face {
+    transform: translateY(var(--ib-hover-lift-s));
+}
+.icon-btn:active:not(:disabled):not(.is-disabled):not(.is-active) {
+    --ib-bg: var(--surface-primary-focus);
+    --ib-border: var(--border-primary-default);
+    --ib-glyph: var(--icon-primary-default);
+}
+.icon-btn:active:not(:disabled):not(.is-disabled) .icon-btn__face {
+    transform: translateY(0);
+    animation: none;
+}
+.icon-btn.is-active {
+    --ib-bg: var(--surface-primary-default);
+    --ib-border: var(--border-primary-focus);
+    --ib-glyph: var(--icon-primary-on-color);
+}
+.icon-btn:disabled,
+.icon-btn.is-disabled {
+    --ib-bg: var(--surface-disabled-primary);
+    --ib-border: var(--border-disabled-disabled);
+    --ib-glyph: var(--icon-disabled-default);
+    cursor: default;
+}
+.icon-btn--tertiary:disabled,
+.icon-btn--tertiary.is-disabled {
+    --ib-bg: transparent;
+    --ib-border: transparent;
+}
+.icon-btn:disabled .icon-btn__face,
+.icon-btn.is-disabled .icon-btn__face { transform: translateY(0); }
+.icon-btn--delete {
+    --ib-bg: var(--surface-warning-default);
+    --ib-border: var(--border-warning-focus);
+    --ib-glyph: var(--icon-warning-on-color);
+}
+.icon-btn--delete:hover:not(:disabled):not(.is-disabled):not(.is-active) {
+    --ib-bg: var(--surface-warning-default);
+    --ib-border: var(--border-warning-focus);
+    --ib-glyph: var(--icon-warning-on-color);
+}
+.icon-btn--delete:active:not(:disabled):not(.is-disabled):not(.is-active) {
+    --ib-bg: var(--surface-warning-focus);
+    --ib-border: var(--border-warning-default);
+    --ib-glyph: var(--icon-warning-default);
+}
+.icon-btn.is-loading > .icon-btn__face { opacity: 1; }
+.icon-btn.is-loading .icon-btn__face > * { opacity: 0; }
+.icon-btn.is-loading::after { z-index: 2; }
+.icon-btn.is-loading .icon-btn__face {
+    transform: translateY(0);
+    animation: none;
+    transition: none;
+}
+.icon-btn.is-loading::before { background: transparent; }
+@media (prefers-reduced-motion: reduce) {
+.icon-btn.is-loading > .icon-btn__face { opacity: 1; }
+.icon-btn.is-loading .icon-btn__face > * { opacity: 0.5; }
+}
+.pbot-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 1190;
+    background: rgba(0, 0, 0, 0.35);
+}
+.pbot-panel {
+    position: fixed;
+    top: 15px;
+    bottom: 15px;
+    right: 15px;
+    z-index: 1200;
+    display: flex;
+    flex-direction: column;
+    width: min(412px, calc(100vw - 30px));
+    --mdbg-size: 100%;
+    --mdbg-x: center;
+    --mdbg-y: 52px;
+    background:
+        linear-gradient(to bottom,
+            #98fdff 0,
+            #98fdff 56px,
+            #05c88f 400px,
+            #05c88f 100%);
+    border: 1px solid var(--border-informative-focus, #0071a2);
+    border-radius: var(--corner-radius-corner-4xl);
+    overflow: hidden;
+    transform-origin: right center;
+    translate: 100% 0;
+    scale: 1.06 1;
+    visibility: hidden;
+    transition:
+        translate var(--motion-slow) var(--ease-deck),
+        scale var(--motion-slow) var(--ease-deck),
+        visibility 0s linear var(--motion-slow);
+}
+.pbot-panel::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+        linear-gradient(to bottom,
+            rgba(5, 200, 143, 0) 0,
+            rgba(5, 200, 143, 0) 300px,
+            #05c88f 470px,
+            #05c88f 100%),
+        var(--mdbg-x) var(--mdbg-y) / var(--mdbg-size) auto no-repeat
+        url('/pbot/askpbot/mathdrillbg.png');
+}
+.pbot-panel:not(.is-math)::before {
+    background:
+        repeating-linear-gradient(to right, rgba(127, 168, 255, 0.1) 0 1px, transparent 1px 59px),
+        repeating-linear-gradient(to bottom, rgba(127, 168, 255, 0.1) 0 1px, transparent 1px 59px),
+        linear-gradient(to bottom, #002e9c 0%, #0253ef 100%);
+    opacity: 1;
+}
+.pbot-panel.is-open {
+    translate: 0 0;
+    scale: 1 1;
+    visibility: visible;
+    transition:
+        translate var(--motion-slow) var(--ease-deck),
+        scale var(--motion-slow) var(--ease-deck),
+        visibility 0s;
+}
+.pbot-panel.is-chat .pbot-panel__head,
+.pbot-panel.is-chat .pbot-panel__glow,
+.pbot-panel.is-chat .pbot-hero { display: none; }
+.pbot-panel.is-chat .pbot-feature { padding: 0; }
+.pbot-panel.is-chat .pbot-conv { border: 0; border-radius: 0; }
+.pbot-web {
+    display: grid;
+    grid-template-columns: minmax(248px, 316px) minmax(0, 1fr);
+    gap: var(--spacing-space-m);
+    height: calc(100dvh - 162px);
+    min-height: 0;
+    padding-block: var(--spacing-space-m);
+}
+.pbot-web > .pbot-web__side,
+.pbot-web > .pbot-web__main { min-height: 0; }
+.pbot-web__side { overflow: hidden; }
+@media (width < 764px) {
+.pbot-web {
+        grid-template-columns: minmax(0, 1fr);
+        height: auto;
+        min-height: 0;
+    }
+.pbot-web__side { max-height: 60vh; }
+.pbot-web__main { min-height: 78vh; }
+}
+.pbot-web__side {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-space-s);
+    min-height: 0;
+    padding: var(--spacing-space-m);
+    background: var(--surface-default-page, #fff);
+    border: 1px solid var(--border-default-subtle, #e6e9ee);
+    border-radius: var(--corner-radius-corner-4xl);
+}
+.pbot-web__newchat {
+    margin-inline: 0;
+    width: auto;
+    align-self: stretch;
+}
+.pbot-deck.pbot-web__deck {
+    align-self: center;
+    width: min(200px, 100%);
+    height: auto;
+    aspect-ratio: 181 / 100;
+    margin-block: var(--spacing-space-xs) var(--spacing-space-s);
+}
+.pbot-web__side-body { display: flex; flex-direction: column; gap: var(--spacing-space-s); flex: 1; min-height: 0; }
+.pbot-web__main {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--azure-100, #d5edfb);
+    border: 1px solid var(--border-informative-focus, #0071a2);
+    border-radius: var(--corner-radius-corner-4xl);
+    overflow: hidden;
+}
+.pbot-web__glow {
+    top: 46%;
+    left: 50%;
+    width: 560px;
+    height: 560px;
+    transform: translate(-50%, -50%);
+    opacity: 0.5;
+    filter: blur(10px);
+}
+.pbot-web__hero {
+    --web-grid: rgba(127, 168, 255, 0.09);
+    --web-grid-soft: rgba(127, 168, 255, 0.07);
+    --web-hero-sub: #bfd6ff;
+    position: relative;
+    z-index: 1;
+    display: flex;
+    justify-content: center;
+    height: 100%;
+    padding: 22px 26px 26px;
+    background:
+        repeating-linear-gradient(to right, transparent 0 159px, var(--web-grid) 159px 160px),
+        repeating-linear-gradient(to bottom, transparent 0 149px, var(--web-grid-soft) 149px 150px),
+        url('/pbot/askpbot/space-bg.jpg') center / cover no-repeat,
+        #16265e;
+}
+.pbot-web__sky { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.pbot-web__sky-glow {
+    position: absolute;
+    left: 50%;
+    top: -270px;
+    width: 900px;
+    height: 630px;
+    max-width: none;
+    transform: translateX(-50%);
+}
+.pbot-web__spark--a { left: 6%;  top: 20%; }
+.pbot-web__spark--b { left: 90%; top: 14%; }
+.pbot-web__spark--c { left: 15%; top: 75%; }
+.pbot-web__column {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    width: min(820px, 100%);
+    min-height: 0;
+}
+.pbot-web__scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 18px;
+    overflow-y: auto;
+    scrollbar-width: none;
+}
+.pbot-web__scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.pbot-web__hero .pbot-compose,
+.pbot-web__hero .pbot-disclaimer { flex: none; }
+@media (height < 1000px) {
+.pbot-web__hero { padding: var(--spacing-space-m) 26px var(--spacing-space-m); }
+.pbot-web__hero .pbot-web__intro { padding-top: 0; gap: var(--spacing-space-s); }
+.pbot-web__hero .pbot-web__prompts { padding-block: 0; }
+.pbot-web__hero .pbot-web__column,
+    .pbot-web__hero .pbot-web__scroll { gap: var(--spacing-space-s); }
+.pbot-web__hero .pbot-web__orbit {
+        transform: scale(0.72);
+        transform-origin: center top;
+        margin-bottom: -58px;
+    }
+}
+@media (height < 880px) {
+.pbot-web__hero .pbot-web__orbit {
+        transform: scale(0.6);
+        margin-bottom: -83px;
+    }
+}
+@media (height < 820px) {
+.pbot-web__hero { padding-block: var(--spacing-space-s); }
+.pbot-web__hero .pbot-web__orbit {
+        transform: scale(0.5);
+        margin-bottom: -104px;
+    }
+.pbot-web__hero .pbot-web__hero-title { font-size: var(--type-t1); line-height: var(--type-t1-lh); }
+.pbot-web__hero .pbot-web__column,
+    .pbot-web__hero .pbot-web__scroll,
+    .pbot-web__hero .pbot-web__intro { gap: var(--spacing-space-xs); }
+}
+.pbot-web__intro {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--spacing-space-l);
+    padding-top: var(--spacing-space-3xl);
+    text-align: center;
+}
+.pbot-web__orbit { position: relative; flex: none; width: 318.93px; height: 208px; }
+.pbot-web__orbit > img { position: absolute; display: block; max-width: none; }
+.pbot-web__halo { left: -27.73px; top: -85.97px; width: 374.4px; height: 374.4px; }
+.pbot-web__orbit .home-pbot__diver {
+    inset: auto;
+    left: -21.53px;
+    top: -76.69px;
+    width: 362px;
+    height: 362px;
+}
+.pbot-web__spark--d { left: 13.87px; top: 0; }
+.pbot-web__spark--e { left: 287.3px; top: 108.33px; }
+.pbot-web__hero-title {
+    margin: 0;
+    font-size: 30px;
+    line-height: 40px;
+    font-weight: 700;
+    color: var(--text-on-color-heading);
+    text-wrap: balance;
+}
+.pbot-web__hero-sub {
+    margin: 0;
+    font-size: var(--type-b2);
+    line-height: 22px;
+    color: var(--web-hero-sub);
+}
+.pbot-web__prompts {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--spacing-space-s);
+    padding-block: var(--spacing-space-l);
+}
+.pbot-web__hero .pbot-web__prompt {
+    padding: var(--spacing-space-xs) var(--spacing-space-m);
+    font-size: var(--type-b5);
+    line-height: var(--type-b5-lh);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pbot-web__hero .pbot-compose {
+    margin-top: auto;
+    padding: 0;
+    border-top: 0;
+    gap: 10px;
+}
+.pbot-web__hero .pbot-disclaimer {
+    padding: 0;
+    font-size: var(--type-b8);
+    line-height: var(--type-b8-lh);
+    font-weight: 500;
+    color: var(--text-on-color-heading);
+    opacity: 0.75;
+}
+.pbot-web__main > .pbot-web__ask { position: relative; z-index: 1; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pbot-web__main .pbot-conv { position: relative; z-index: 1; flex: 1; height: auto; min-height: 0; }
+.pbot-web__main .pbot-conv { border: 0; border-radius: 0; }
+.pbot-panel--left {
+    right: auto;
+    left: 15px;
+    transform-origin: left center;
+    translate: -100% 0;
+}
+.pbot-panel__glow {
+    display: none;
+}
+.pbot-panel__head {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--spacing-space-m);
+    background: transparent;
+}
+.pbot-panel__title {
+    font-size: var(--type-t2);
+    font-weight: 700;
+    line-height: var(--type-t2-lh);
+    color: var(--text-tertiary-default);
+}
+.pbot-panel:not(.is-math) .pbot-panel__title { color: var(--text-on-color-heading); }
+.pbot-panel__close {
+    position: absolute;
+    right: var(--spacing-space-s);
+}
+.pbot-panel__max {
+    position: absolute;
+    left: var(--spacing-space-s);
+}
+.pbot-panel__max.icon-btn--l { width: 30px; height: 30px; }
+.pbot-panel__max.icon-btn--l .icon-btn__face svg { width: 18px; height: 18px; }
+.pbot-panel__max .icon-btn__face {
+    transition: transform var(--motion-release) var(--ease-boing);
+}
+.pbot-panel__max .icon-btn__face.btn-raise { animation: none; }
+.pbot-panel__max.icon-btn:hover:not(:disabled):not(.is-disabled):not(:active):not(.is-active):not(.is-loading) .icon-btn__face {
+    transform: translateY(calc(-3px - var(--btn-hover-raise)));
+}
+.pbot-hero {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--spacing-space-s);
+    padding: var(--spacing-space-m) var(--spacing-space-2xl) var(--spacing-space-2xl);
+}
+.pbot-hero { flex-direction: row-reverse; }
+.pbot-deck {
+    position: relative;
+    flex: none;
+    width: 181px;
+    height: 100px;
+    padding: 0;
+    border: 0;
+    background: none;
+    appearance: none;
+    cursor: pointer;
+}
+.pbot-deck__card {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    line-height: 0;
+    border-radius: 16px;
+    overflow: hidden;
+    transform-origin: center bottom;
+    box-shadow: 3px 5px 0 0 rgba(2, 44, 34, 0.22);
+    transition: transform var(--motion-base) var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)),
+                box-shadow var(--motion-base) var(--ease-out);
+}
+.pbot-deck__card img { display: block; width: 100%; height: auto; }
+.pbot-deck__card.is-front { z-index: 2; transform: translateY(6px) scale(1); }
+.pbot-deck__card.is-back  { z-index: 1; transform: translateY(-8px) scale(0.9); }
+.pbot-deck:hover .pbot-deck__card.is-back  { z-index: 3; transform: translateY(-16px) rotate(-6deg) scale(0.97); box-shadow: 4px 6px 0 0 rgba(2, 44, 34, 0.24); }
+.pbot-deck:hover .pbot-deck__card.is-front { transform: translateY(12px) scale(0.95); }
+.pbot-deck:active .pbot-deck__card.is-front { transform: translateY(14px) scale(0.94); }
+@media (prefers-reduced-motion: no-preference) {
+.pbot-deck:not(:hover) .pbot-deck__card.is-back { animation: pbotDeckPeek 5s ease-in-out infinite; }
+}
+.pbot-podium { position: relative; flex: none; width: 120px; height: 104px; }
+.pbot-panel:not(.is-math) .pbot-podium__mascot { bottom: 99.45px; }
+.pbot-podium__pod {
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    transform: translateX(-50%);
+    width: 112px;
+    height: 121.669px;
+    overflow: hidden;
+    pointer-events: none;
+}
+.pbot-podium__pod img {
+    position: absolute;
+    left: 0.08%;
+    top: 0;
+    width: 99.82%;
+    height: 162.6%;
+    max-width: none;
+}
+.pbot-podium__mascot {
+    position: absolute;
+    left: 36%;
+    bottom: 30px;
+    width: 118px;
+    height: 118px;
+    z-index: 2;
+    transform: translate(-50%, 0);
+    pointer-events: none;
+    filter:
+        drop-shadow(0.5px 0 #0b5851)
+        drop-shadow(-0.5px 0 #0b5851)
+        drop-shadow(0 0.5px #0b5851)
+        drop-shadow(0 -0.5px #0b5851);
+}
+.pbot-podium__canvas {
+    width: 125%; height: 125%; display: block;
+    transform-origin: center bottom;
+    transition: transform var(--motion-base, 0.25s) var(--ease-out, ease);
+    will-change: transform;
+}
+@media (prefers-reduced-motion: no-preference) {
+.pbot-podium__mascot {
+        transform: translate(-50%, 48px);
+        opacity: 0;
+        transition: transform 0.55s var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)) 0.28s,
+                    opacity 0.3s var(--ease-out) 0.28s;
+    }
+.pbot-panel.is-open .pbot-podium__mascot { transform: translate(-50%, 0); opacity: 1; }
+.pbot-podium__mascot.is-popping { animation: pbotPodiumPop 0.55s var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)) both; }
+}
+.pbot-feature {
+    position: relative;
+    z-index: 1;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: var(--spacing-space-m);
+    overflow: hidden;
+}
+.pbot-home {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    gap: var(--spacing-space-s);
+    min-height: 0;
+    padding-block: var(--spacing-space-s) var(--spacing-space-2xs, 4px);
+}
+.pbot-home > .btn { width: 100%; }
+.pbot-empty {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-space-s);
+    padding: var(--spacing-space-xl) var(--spacing-space-m);
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    backdrop-filter: blur(12px);
+    border-radius: var(--corner-radius-corner-4xl);
+    text-align: center;
+}
+.pbot-empty__art { width: 108px; height: 108px; object-fit: contain; }
+.pbot-empty__text {
+    max-width: 22ch;
+    font-size: var(--type-b5);
+    line-height: var(--type-b5-lh);
+    color: color-mix(in srgb, var(--text-on-color-heading) 80%, transparent);
+}
+.pbot-history {
+    position: relative;
+    display: flex;
+    flex-direction: row;
+    gap: var(--spacing-space-xs);
+    flex: 1;
+    min-height: 0;
+    padding: var(--spacing-space-m);
+    padding-right: var(--spacing-space-xs);
+    background: rgba(255, 255, 255, 0.1);
+    border: var(--border-width-xs) solid rgba(255, 255, 255, 0.28);
+    backdrop-filter: blur(12px);
+    border-radius: var(--corner-radius-corner-4xl);
+    overflow: hidden;
+}
+.pbot-history__box {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: none;
+}
+.pbot-history__box::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.pbot-history__inner { display: flex; flex-direction: column; gap: var(--spacing-space-xs); }
+.pbot-history__box {
+    --hist-fade: var(--spacing-space-xl);
+    -webkit-mask-image: linear-gradient(to bottom,
+        rgba(0, 0, 0, 0) 0,
+        rgba(0, 0, 0, 0.2) calc(var(--hist-fade-top) * 0.25),
+        rgba(0, 0, 0, 0.5) calc(var(--hist-fade-top) * 0.5),
+        rgba(0, 0, 0, 0.8) calc(var(--hist-fade-top) * 0.75),
+        #000 var(--hist-fade-top),
+        #000 calc(100% - var(--hist-fade-bottom)),
+        rgba(0, 0, 0, 0.8) calc(100% - var(--hist-fade-bottom) * 0.75),
+        rgba(0, 0, 0, 0.5) calc(100% - var(--hist-fade-bottom) * 0.5),
+        rgba(0, 0, 0, 0.2) calc(100% - var(--hist-fade-bottom) * 0.25),
+        rgba(0, 0, 0, 0) 100%);
+            mask-image: linear-gradient(to bottom,
+        rgba(0, 0, 0, 0) 0,
+        rgba(0, 0, 0, 0.2) calc(var(--hist-fade-top) * 0.25),
+        rgba(0, 0, 0, 0.5) calc(var(--hist-fade-top) * 0.5),
+        rgba(0, 0, 0, 0.8) calc(var(--hist-fade-top) * 0.75),
+        #000 var(--hist-fade-top),
+        #000 calc(100% - var(--hist-fade-bottom)),
+        rgba(0, 0, 0, 0.8) calc(100% - var(--hist-fade-bottom) * 0.75),
+        rgba(0, 0, 0, 0.5) calc(100% - var(--hist-fade-bottom) * 0.5),
+        rgba(0, 0, 0, 0.2) calc(100% - var(--hist-fade-bottom) * 0.25),
+        rgba(0, 0, 0, 0) 100%);
+    transition:
+        --hist-fade-top var(--motion-slow, 0.4s) var(--ease-out, ease-out),
+        --hist-fade-bottom var(--motion-slow, 0.4s) var(--ease-out, ease-out);
+}
+.pbot-history__box.is-fade-top { --hist-fade-top: var(--hist-fade); }
+.pbot-history__box.is-fade-bottom { --hist-fade-bottom: var(--hist-fade); }
+.pbot-history__group { display: flex; flex-direction: column; gap: var(--spacing-space-xs); }
+.pbot-history__label {
+    padding-top: var(--spacing-space-xs);
+    padding-inline: var(--spacing-space-xs);
+    font-size: var(--type-b1);
+    line-height: var(--type-b1-lh);
+    font-weight: 500;
+    text-align: left;
+    color: var(--text-on-color-heading);
+}
+.pbot-history__item {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-2xs, 4px);
+    padding: var(--spacing-space-xs) var(--spacing-space-s) var(--spacing-space-xs) var(--spacing-space-m);
+    background: var(--surface-general-default);
+    border: var(--border-width-xs, 1px) solid var(--border-general-default);
+    border-radius: var(--corner-radius-corner-pill);
+}
+.pbot-history__more {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--icon-primary-default);
+    cursor: pointer;
+}
+.pbot-history__acts {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-xs);
+}
+.pbot-history__pair {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    gap: var(--spacing-space-xs);
+}
+.pbot-history__pair > .btn { flex: 1; min-width: 0; }
+.pbot-history__acts > .pbot-rename { flex: 1; min-width: 0; }
+.pbot-history__confirm {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-xs);
+}
+.pbot-history__ask {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: var(--type-b5);
+    line-height: var(--type-b5-lh);
+    color: var(--text-default-body);
+}
+.pbot-history__ask > span {
+    display: block;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pbot-history__item.is-acting { padding: var(--spacing-space-xs); }
+.pbot-history__open {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: var(--type-b1);
+    font-weight: 600;
+    color: var(--text-default-body);
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.pbot-conv {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+    background: var(--surface-general-default);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-3xl, 24px);
+    overflow: hidden;
+}
+.pbot-conv__head {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-s);
+    padding: var(--spacing-space-m) var(--spacing-space-xl);
+    background: var(--surface-secondary-default-subtle-hover);
+    border-bottom: 1px solid var(--border-primary-default);
+}
+.pbot-conv__logwrap {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.pbot-conv__log {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-space-m);
+    padding: var(--spacing-space-m);
+    overflow-y: auto;
+    scrollbar-width: none;
+    width: 100%;
+    max-width: 800px;
+    margin-inline: auto;
+}
+.pbot-conv__log::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.pbot-turn {
+    --pbot-avatar: 50px;
+    --pbot-turn-gap: var(--spacing-space-xs);
+    display: flex;
+    gap: var(--pbot-turn-gap);
+    max-width: calc(100% - var(--pbot-avatar) - var(--pbot-turn-gap));
+}
+.pbot-turn--bot { align-self: flex-start; }
+.pbot-turn--user { align-self: flex-end; }
+.pbot-turn .pbot-turn__avatar--me {
+    align-self: flex-start;
+    background: var(--surface-general-default);
+    border: 1px solid var(--border-default);
+    border-radius: 50%;
+    overflow: hidden;
+}
+.pbot-turn .pbot-turn__avatar--me::before,
+.pbot-turn .pbot-turn__avatar--me::after { content: none; }
+.pbot-turn .pbot-turn__avatar--me img {
+    display: block;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    object-fit: cover;
+    object-position: center;
+    animation: none;
+    will-change: auto;
+}
+@media (prefers-reduced-motion: no-preference) {
+.pbot-turn { animation: pbotBubbleIn var(--motion-base, 0.25s) var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)) both; }
+.pbot-turn--user { transform-origin: bottom right; }
+.pbot-turn--bot { transform-origin: bottom left; }
+}
+.pbot-turn__avatar {
+    --pbot-badge-top: #2c9cd7;
+    --pbot-badge-bottom: #2154e6;
+    --pbot-badge-ring: var(--border-on-color);
+    flex-shrink: 0;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--pbot-avatar, 50px);
+    height: var(--pbot-avatar, 50px);
+    box-sizing: border-box;
+    border: 1px solid var(--pbot-badge-ring);
+    border-radius: var(--corner-radius-corner-lg);
+    background:
+        url('/pbot/askpbot/pbot-bg.png') center / 122% no-repeat,
+        linear-gradient(180deg, var(--pbot-badge-top) 0%, var(--pbot-badge-bottom) 100%);
+    overflow: hidden;
+}
+.pbot-turn__avatar::before {
+    content: '';
+    position: absolute;
+    top: -1px;
+    left: 50%;
+    width: 51.77px;
+    aspect-ratio: 49.852 / 30;
+    transform: translateX(-50%);
+    background: url('/pbot/askpbot/pbot-graph.svg') center / contain no-repeat;
+    pointer-events: none;
+    z-index: 1;
+}
+.pbot-turn__avatar::after {
+    content: '';
+    position: absolute;
+    top: -1px;
+    left: 50%;
+    width: 51.77px;
+    aspect-ratio: 49.852 / 30;
+    transform: translateX(-50%);
+    background: linear-gradient(90deg, transparent 42%, rgba(224, 249, 255, 0.95) 50%, transparent 58%);
+    background-size: 40% 100%;
+    background-repeat: no-repeat;
+    background-position: -40% 0;
+    -webkit-mask: url('/pbot/askpbot/pbot-graph-line.svg') center / contain no-repeat;
+    mask: url('/pbot/askpbot/pbot-graph-line.svg') center / contain no-repeat;
+    mix-blend-mode: screen;
+    pointer-events: none;
+    z-index: 1;
+}
+@media (prefers-reduced-motion: no-preference) {
+.pbot-turn__avatar::after { animation: pbotAnalyze 2.4s linear infinite; }
+}
+@media (prefers-reduced-motion: reduce) {
+.pbot-turn__avatar::after { display: none; }
+}
+.pbot-turn__avatar img {
+    display: block;
+    position: absolute;
+    left: 50%;
+    bottom: -7px;
+    width: 40px;
+    height: auto;
+    margin-left: -20px;
+    z-index: 2;
+}
+@media (prefers-reduced-motion: no-preference) {
+.pbot-turn__avatar img {
+        animation: pbotFloat 3.2s ease-in-out infinite;
+        will-change: transform;
+    }
+}
+.pbot-turn__col { display: flex; flex-direction: column; gap: var(--spacing-space-xxs); min-width: 0; }
+.pbot-bubble {
+    padding: var(--spacing-space-s);
+    font-size: var(--type-b1);
+    line-height: var(--type-b1-lh);
+    border-radius: var(--corner-radius-corner-xl);
+}
+.pbot-turn--bot .pbot-bubble {
+    background: var(--surface-secondary-default-hover);
+    color: var(--text-default-body);
+    border: var(--border-width-xs, 1px) solid var(--border-primary-default-hover);
+}
+.pbot-turn--user .pbot-bubble {
+    background: var(--border-success-default);
+    border: var(--border-width-xs, 1px) solid var(--border-success-default);
+    color: var(--text-on-color-heading);
+}
+.pbot-bubble.pbot-markdown.is-latest { position: relative; }
+.pbot-bubble.pbot-markdown.is-latest::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1.5px;
+    background: linear-gradient(115deg, transparent 38%, rgba(255, 255, 255, 0.92) 50%, transparent 62%);
+    background-size: 250% 100%;
+    background-repeat: no-repeat;
+    background-position: 150% 0;
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    pointer-events: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+.pbot-bubble.pbot-markdown.is-latest::after { animation: pbotReplyShine 4.5s ease-in-out infinite; }
+}
+.pbot-turn__acts { display: flex; gap: var(--spacing-space-3xs); }
+.pbot-turn__acts button {
+    display: inline-flex;
+    padding: var(--spacing-space-xxs);
+    border: 0;
+    background: none;
+    color: var(--text-default-caption);
+    cursor: pointer;
+    transition: color var(--motion-base) var(--ease-out),
+                transform var(--motion-fast) var(--ease-spring);
+}
+.pbot-turn__acts button:hover { color: var(--text-primary-default); }
+.pbot-turn__acts button.is-flagged { color: var(--text-warning-default); }
+.pbot-bubble--typing { display: inline-flex; gap: var(--spacing-space-xxs); }
+.pbot-bubble--typing span {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--text-default-caption);
+}
+@media (prefers-reduced-motion: no-preference) {
+.pbot-bubble--typing span { animation: pbot-typing 1s var(--ease-out) infinite; }
+.pbot-bubble--typing span:nth-child(2) { animation-delay: 0.15s; }
+.pbot-bubble--typing span:nth-child(3) { animation-delay: 0.3s; }
+}
+.pbot-compose {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-xs);
+    padding: var(--spacing-space-m) var(--spacing-space-m) var(--spacing-space-m);
+    border-top: 1px solid var(--border-general-default);
+}
+.pbot-compose__pill {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-2xs, 4px);
+    min-height: 40px;
+    padding: var(--spacing-space-xs) var(--spacing-space-s);
+    background: var(--surface-general-default);
+    border: 1px solid var(--border-general-default);
+    border-radius: var(--corner-radius-corner-pill, 999px) 0 0 var(--corner-radius-corner-pill, 999px);
+    margin-right: -1px;
+    transition: border-radius var(--motion-base, 0.25s) var(--ease-out, ease);
+}
+.pbot-compose__pill:focus-within { border-color: var(--border-primary-default); }
+.pbot-compose .pbot-compose__group { align-items: center; }
+.pbot-compose .pbot-compose__pill {
+    padding: var(--spacing-space-xs);
+    margin-right: 0;
+    background: var(--surface-general-default-alpha);
+    border-radius: var(--corner-radius-corner-2xl);
+}
+.pbot-compose__sendwrap {
+    flex: none;
+    display: flex;
+    width: 0;
+    margin-left: 0;
+    opacity: 0;
+    overflow-x: clip;
+    overflow-y: visible;
+    transform: translateX(-4px);
+    pointer-events: none;
+    transition:
+        width var(--motion-base, 0.25s) var(--ease-deck, cubic-bezier(0.34, 1.56, 0.64, 1)),
+        margin-left var(--motion-base, 0.25s) var(--ease-deck, cubic-bezier(0.34, 1.56, 0.64, 1)),
+        opacity var(--motion-fast, 0.15s) var(--ease-out, ease),
+        transform var(--motion-base, 0.25s) var(--ease-out, ease);
+}
+.pbot-compose__sendwrap.is-ready {
+    width: 40px;
+    margin-left: var(--spacing-space-xxs);
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+}
+.pbot-compose__sendwrap > .icon-btn { flex: none; width: 40px; }
+.pbot-compose__field {
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    max-height: 120px;
+    padding: 0;
+    border: 0;
+    background: none;
+    resize: none;
+    font: inherit;
+    font-size: var(--type-b1);
+    line-height: 24px;
+    color: var(--text-default-heading);
+    scrollbar-width: none;
+}
+.pbot-compose__field::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.pbot-compose__field:focus { outline: none; }
+.pbot-compose__field::placeholder { color: var(--text-default-caption); }
+.pbot-conv--space .pbot-compose__field::placeholder,
+.pbot-web__hero .pbot-compose__field::placeholder { color: var(--text-on-color-caption); }
+.pbot-conv--space .pbot-compose__field,
+.pbot-web__hero .pbot-compose__field { color: var(--text-on-color-heading); }
+.pbot-compose__group {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: stretch;
+    min-height: 40px;
+}
+.pbot-rename .pbot-compose__send,
+.pbot-rename .pbot-compose__stop {
+    width: auto;
+    height: auto;
+    flex: none;
+    align-self: stretch;
+    border-radius: 0 var(--corner-radius-corner-pill, 999px) var(--corner-radius-corner-pill, 999px) 0;
+}
+.pbot-rename .pbot-compose__send::before,
+.pbot-rename .pbot-compose__stop::before { display: none; }
+.pbot-rename .pbot-compose__send .icon-btn__face,
+.pbot-rename .pbot-compose__stop .icon-btn__face {
+    padding: var(--spacing-space-xs) var(--spacing-space-m) var(--spacing-space-xs) var(--spacing-space-s);
+    border-radius: inherit;
+    transform: none;
+}
+.pbot-rename .pbot-compose__send.icon-btn:hover:not(:disabled):not(.is-disabled):not(:active):not(.is-active):not(.is-loading) .icon-btn__face,
+.pbot-rename .pbot-compose__stop.icon-btn:hover:not(:disabled):not(.is-disabled):not(:active):not(.is-active):not(.is-loading) .icon-btn__face,
+.pbot-rename .pbot-compose__send.icon-btn:active:not(:disabled):not(.is-disabled) .icon-btn__face,
+.pbot-rename .pbot-compose__stop.icon-btn:active:not(:disabled):not(.is-disabled) .icon-btn__face { transform: none; }
+.pbot-rename .pbot-compose__send .icon-btn__face.btn-raise,
+.pbot-rename .pbot-compose__stop .icon-btn__face.btn-raise { animation: none; transform: none; }
+.pbot-rename .pbot-compose__send .icon-btn__face svg,
+.pbot-rename .pbot-compose__stop .icon-btn__face svg { width: 18px; height: 18px; }
+.pbot-disclaimer {
+    padding: 0 var(--spacing-space-m) var(--spacing-space-s);
+    font-size: var(--type-c2);
+    line-height: 16px;
+    text-align: center;
+    color: var(--text-default-caption);
+}
+.pbot-conv--space .pbot-compose .pbot-compose__pill,
+.pbot-web__hero .pbot-compose .pbot-compose__pill {
+    background: transparent;
+}
+.pbot-conv--space {
+    position: relative;
+    gap: var(--spacing-space-s);
+    padding: var(--spacing-space-m);
+    overflow: hidden;
+}
+.pbot-scene { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+.pbot-conv--space > :not(.pbot-scene):not(.pbot-modal) { position: relative; z-index: 1; }
+.pbot-conv--space > .pbot-modal { z-index: 1300; }
+.pbot-conv--space .pbot-conv__head {
+    flex: none;
+    justify-content: space-between;
+    padding: 0;
+    background: none;
+    border-bottom: 0;
+}
+.pbot-conv__brand { display: flex; align-items: center; gap: var(--spacing-space-m); }
+.pbot-conv__mark { display: block; width: auto; height: 26px; }
+.pbot-conv--space .pbot-conv__log {
+    --log-fade: var(--spacing-space-xl);
+    padding: var(--log-fade) 0;
+    scroll-behavior: smooth;
+}
+.pbot-conv--space .pbot-conv__log {
+    --log-fade-top: 0px;
+    --log-fade-bottom: 0px;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--log-fade-top), #000 calc(100% - var(--log-fade-bottom)), transparent 100%);
+            mask-image: linear-gradient(to bottom, transparent 0, #000 var(--log-fade-top), #000 calc(100% - var(--log-fade-bottom)), transparent 100%);
+}
+.pbot-conv--space .pbot-conv__log.is-fade-top { --log-fade-top: var(--log-fade); }
+.pbot-conv--space .pbot-conv__log.is-fade-bottom { --log-fade-bottom: var(--log-fade); }
+.pbot-conv--space .pbot-compose { flex: none; border-top: 0; }
+.pbot-conv--space .pbot-disclaimer { flex: none; padding: 0; }
+.pbot-composer {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-space-xs);
+    margin-inline: calc(var(--spacing-space-m) * -1);
+    margin-bottom: calc(var(--spacing-space-m) * -1);
+    padding: var(--spacing-space-s) var(--spacing-space-m);
+    background: transparent;
+    border-top: 0;
+}
+.pbot-conv--space .pbot-turn--user .pbot-bubble {
+    background: var(--surface-primary-default-subtle);
+    border-color: var(--border-default);
+    color: var(--text-primary-focus);
+    border-radius: var(--corner-radius-corner-xl);
+    border-top-right-radius: var(--spacing-space-xxs);
+}
+.pbot-conv--space .pbot-turn--user .pbot-bubble {
+    position: relative;
+    border-top-right-radius: 0;
+}
+.pbot-conv--space .pbot-turn--user .pbot-bubble::before {
+    content: '';
+    position: absolute;
+    right: -16.454px;
+    top: -1px;
+    width: 15.454px;
+    height: 19.656px;
+    background: var(--border-default);
+    clip-path: polygon(0 0, 86.2% 0, 100% 26.4%, 0 100%);
+    pointer-events: none;
+}
+.pbot-conv--space .pbot-turn--user .pbot-bubble::after {
+    content: '';
+    position: absolute;
+    right: -15.25px;
+    top: 0.2px;
+    width: 15.75px;
+    height: 17.2px;
+    background: var(--surface-primary-default-subtle);
+    clip-path: polygon(0 0, 86.2% 0, 100% 26.4%, 0 100%);
+    pointer-events: none;
+}
+.pbot-conv--space .pbot-turn--user .pbot-voicemsg .pbot-wave__bar { background: var(--text-primary-focus); }
+.pbot-conv--space .pbot-turn--user .pbot-voicemsg__time { color: var(--text-primary-focus); }
+.pbot-conv--space .pbot-turn--user .pbot-voicemsg__play { --ib-border: var(--border-default); }
+.pbot-conv--space .pbot-turn--user .pbot-voicemsg__play .icon-btn__face {
+    background: var(--surface-primary-default);
+    border-color: var(--border-default);
+    color: var(--text-on-color-heading);
+}
+.pbot-conv--space .pbot-turn--user .pbot-voicemsg__play.is-playing .icon-btn__face {
+    background: var(--text-on-color-heading);
+    color: var(--surface-primary-default);
+}
+.pbot-conv--space .pbot-turn--user .pbot-voicemsg.is-playing::before {
+    background: color-mix(in srgb, var(--text-primary-focus) 18%, transparent);
+}
+.pbot-conv--space .pbot-turn--user .pbot-imgmsg {
+    padding: 0;
+    background: none;
+    border: 0;
+}
+.pbot-web-shell { display: contents; }
+.pbot-web.is-ask {
+    position: relative;
+    padding: var(--spacing-space-m);
+    border-radius: var(--corner-radius-corner-4xl);
+    overflow: hidden;
+}
+.pbot-web__side { position: relative; }
+.pbot-deck.pbot-web__deck { margin-top: 24px; }
+.pbot-topbar {
+    position: relative;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-xs);
+    min-height: 50px;
+    margin-bottom: 0;
+    padding: 8px 14px 8px var(--spacing-space-m);
+    box-sizing: border-box;
+    background: var(--accents-butter-on-color-hover, #fffff4);
+    border: var(--border-width-xs) solid var(--border-informative-default-subtle-hover, #b3e4f9);
+    border-bottom: 0;
+    border-radius: var(--corner-radius-corner-4xl);
+}
+.pbot-topbar__left { display: flex; align-items: center; gap: var(--spacing-space-xs); }
+.pbot-topbar__mid {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-xs);
+}
+.pbot-topbar__brand {
+    display: block;
+    flex: none;
+    margin-inline-start: auto;
+    width: 41.78px;
+    height: 26.36px;
+}
+.pbot-topbar__title {
+    font-size: var(--type-b1);
+    line-height: var(--type-b1-lh);
+    font-weight: 600;
+    color: var(--text-on-color-heading);
+    white-space: nowrap;
+}
+.pbot-web.is-ask::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    background:
+        repeating-linear-gradient(to right, rgba(127, 168, 255, 0.09) 0 1px, transparent 1px 160px),
+        repeating-linear-gradient(to bottom, rgba(127, 168, 255, 0.09) 0 1px, transparent 1px 160px),
+        radial-gradient(10.5% 15.4% at 27.7% 33%, rgba(143, 227, 255, 0.25), transparent 70%),
+        radial-gradient(25.5% 36.2% at 91.2% 98.4%, rgba(143, 227, 255, 0.25), transparent 70%),
+        linear-gradient(to bottom, #002e9c 0%, #0253ef 100%);
+    pointer-events: none;
+}
+.pbot-orb {
+    position: absolute;
+    left: var(--orb-x);
+    top: var(--orb-y);
+    z-index: 0;
+    width: var(--orb-w);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    opacity: var(--orb-a);
+    pointer-events: none;
+    background: radial-gradient(circle closest-side,
+        #2252e7 0%, #2253e7 40%, #2356e6 50%, #255ae5 55%, #285fe4 60%, #2b66e3 65%,
+        #3171e1 70%, #377edf 75%, #3e8edc 80%, #469ed9 84%, #4fafd5 88%, #57bed2 91%,
+        #5fd0cf 94%, #65dccd 96%, #6ae5cb 97.5%, #72f4c8 100%);
+}
+.pbot-orb--web-lg { --orb-x: 68.89%; --orb-y: 66.89%; --orb-w: 45.11%; --orb-a: 0.7; }
+.pbot-orb--web-md { --orb-x: 19.61%; --orb-y: 21.11%; --orb-w: 15.59%; --orb-a: 0.55; }
+.pbot-orb--web-sm { --orb-x: 82.97%; --orb-y: 2.78%; --orb-w: 4.54%; --orb-a: 0.34; }
+.pbot-glow {
+    position: absolute;
+    left: var(--glow-x);
+    top: var(--glow-y);
+    z-index: 0;
+    width: var(--glow-w);
+    height: var(--glow-h);
+    pointer-events: none;
+    background: radial-gradient(closest-side, rgba(143, 227, 255, 0.25), transparent 100%);
+}
+.pbot-glow--panel-a { --glow-x: -16.02%; --glow-y: -12.12%; --glow-w: 90%; --glow-h: 35%; }
+.pbot-glow--panel-b { --glow-x: 35.44%;  --glow-y: 72.62%;  --glow-w: 90%; --glow-h: 35%; }
+.pbot-watermark {
+    position: absolute;
+    left: -5.206%;
+    bottom: -1.095%;
+    z-index: 0;
+    width: 54.39%;
+    aspect-ratio: 1419 / 900;
+    transform: rotate(23.75deg);
+    background: url('/pbot/askpbot/askpbot-watermark-filled.png') center / contain no-repeat;
+    opacity: 0.19;
+    mix-blend-mode: overlay;
+    pointer-events: none;
+}
+.pbot-orb--panel-lg { --orb-x: 42.72%; --orb-y: 73.40%; --orb-w: 88.35%; --orb-a: 1; }
+.pbot-panel {
+    --orb-sm-x: 0%;
+    --orb-sm-y: calc(var(--mdbg-y) - 16.76px + (min(412px, calc(100vw - 30px)) - 2px) * 0.3671875);
+    --orb-sm-w: 43.45%;
+}
+@media (max-width: 480px) {
+.pbot-panel { --orb-sm-y: calc(var(--mdbg-y) - 16.76px + (100vw - 2px) * 0.3671875); }
+}
+.pbot-orb--panel-sm { --orb-x: var(--orb-sm-x); --orb-y: var(--orb-sm-y); --orb-w: var(--orb-sm-w); --orb-a: 1; }
+.pbot-panel:not(.is-math) .pbot-hero { position: static; }
+.pbot-panel:not(.is-math) .pbot-podium {
+    position: absolute;
+    left: calc(var(--orb-sm-x) + var(--orb-sm-w) / 2 - 60px);
+    top: calc(var(--orb-sm-y) - 40.33px);
+}
+.pbot-web.is-ask::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 35%;
+    z-index: 0;
+    width: 20%;
+    margin: 2.189% 0 0 3.45%;
+    aspect-ratio: 356 / 225.841;
+    background: url('/pbot/askpbot/askpbot-watermark.png') center / contain no-repeat;
+    opacity: 0.6;
+    mix-blend-mode: overlay;
+    transform-origin: center;
+    pointer-events: none;
+}
+.pbot-web.is-ask .pbot-web__side,
+.pbot-web.is-ask .pbot-web__main { position: relative; z-index: 1; }
+.pbot-web.is-ask .pbot-web__main {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    overflow: visible;
+}
+.pbot-web.is-ask .pbot-web__hero { background: none; }
+.pbot-web.is-ask .pbot-web__side {
+    gap: 10px;
+    padding: var(--spacing-space-m) var(--spacing-space-m) 10px;
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.28);
+    backdrop-filter: blur(12px);
+}
+.pbot-web.is-ask .pbot-history,
+.pbot-web.is-ask .pbot-empty { background: transparent; border: 0; backdrop-filter: none; }
+.pbot-web.is-ask .pbot-history { padding-inline: 0; }
+.pbot-web.is-ask .pbot-compose__send:disabled {
+    --ib-bg: var(--surface-primary-default);
+    --ib-border: var(--border-primary-focus);
+    --ib-glyph: var(--text-on-color-heading);
+    opacity: 1;
+}
+.pbot-web.is-ask .pbot-empty__text { color: rgba(255, 255, 255, 0.72); }
+.pbot-topbar--space {
+    background: rgba(255, 255, 255, 0.1);
+    border: var(--border-width-xs) solid rgba(255, 255, 255, 0.28);
+    border-radius: var(--corner-radius-corner-rounded);
+    backdrop-filter: blur(12px);
+}
+.pbot-topbar--space .pbot-topbar__title {
+    font-size: var(--type-t4);
+    line-height: var(--type-t4-lh);
+    font-weight: 700;
+}
+.pbot-web.is-ask .pbot-web__ask .pbot-conv--space {
+    background: transparent;
+}
+.pbot-web.is-ask .pbot-web__ask .pbot-conv--space > .pbot-scene--space { display: none; }
+.pbot-scene__spark { position: absolute; display: block; }
+.pbot-conv--space {
+    --space-top: #16265e;
+    --space-bottom: #2b4fa6;
+    --space-grid-base: #7fa8ff;
+    --space-glow-base: #8fe3ff;
+    --space-ink: #eaf3ff;
+    --space-ink-dim: #bfd6ff;
+    --space-glow: color-mix(in srgb, var(--space-glow-base) 30%, transparent);
+    --space-bubble: color-mix(in srgb, var(--text-on-color-heading) 12%, transparent);
+    --space-bubble-ring: color-mix(in srgb, var(--text-on-color-heading) 12%, transparent);
+    --space-hairline: color-mix(in srgb, var(--text-on-color-heading) 28%, transparent);
+    --space-ring: color-mix(in srgb, var(--text-on-color-heading) 90%, transparent);
+    --space-chip-bg: color-mix(in srgb, var(--surface-general-default-secondary) 50%, transparent);
+    --space-disclaimer: color-mix(in srgb, var(--text-on-color-heading) 75%, transparent);
+    --space-code-bg: color-mix(in srgb, var(--text-on-color-heading) 14%, transparent);
+    background:
+        var(--space-top)
+        url('/pbot/askpbot/space-bg.jpg') center / cover no-repeat;
+    border-color: var(--space-top);
+    color: var(--space-ink);
+}
+.pbot-panel .pbot-conv--space {
+    background: transparent;
+}
+.pbot-scene--space .pbot-scene__spark--node { left: 271px; top: 691px; width: 6.975px; height: 6.975px; }
+.pbot-scene--space .pbot-scene__spark--a { left: 32.96px;  top: 267.3px;  width: 14px; height: 14px; }
+.pbot-scene--space .pbot-scene__spark--b { left: 362.56px; top: 213.84px; width: 10px; height: 10px; }
+.pbot-scene--space .pbot-scene__spark--c { left: 82.4px;   top: 552.42px; width: 9px;  height: 9px; }
+.pbot-panel.is-chat:not(.is-math)::before {
+    background:
+        repeating-linear-gradient(to right, rgba(127, 168, 255, 0.1) 0 1px, transparent 1px 59px),
+        linear-gradient(to bottom, transparent calc(100% - 1px), rgba(127, 168, 255, 0.07) calc(100% - 1px)) 0 0 / 100% calc(100% / 7) repeat-y,
+        linear-gradient(to bottom, #002e9c 0%, #0253ef 100%);
+}
+.pbot-panel.is-chat:not(.is-math) { --orb-sm-x: -17.72%; --orb-sm-y: 17.06%; --orb-sm-w: 30.1%; }
+.pbot-panel.is-chat:not(.is-math) .pbot-watermark {
+    left: -5.597%;
+    top: 67.04%;
+    bottom: auto;
+    width: 77.32%;
+    transform: rotate(19.99deg);
+    opacity: 0.06;
+    mix-blend-mode: normal;
+}
+.pbot-panel .pbot-conv--space .pbot-conv__log { gap: 10px; }
+.pbot-panel .pbot-conv--space .pbot-turn { --pbot-avatar: 41.5px; --pbot-turn-gap: 10px; }
+.pbot-panel .pbot-conv--space .pbot-turn__avatar {
+    width: 50px;
+    height: 50px;
+    zoom: 0.83;
+}
+.pbot-panel .pbot-conv--space .pbot-turn__acts svg { width: 14.76px; height: 14.76px; }
+.pbot-panel .pbot-conv--space > .pbot-attach-host { margin-bottom: -3px; }
+.pbot-panel .pbot-conv--space .pbot-attach__thumb {
+    border: 0.5px solid var(--border-default);
+    border-radius: 8.79px;
+}
+.pbot-panel .pbot-conv--space .pbot-composer {
+    background: color-mix(in srgb, var(--text-on-color-heading) 25%, transparent);
+    border-top: var(--border-width-xs, 1px) solid var(--space-hairline);
+}
+.pbot-panel .pbot-conv--space .pbot-compose .pbot-compose__pill,
+.pbot-web .pbot-web__ask .pbot-compose .pbot-compose__pill {
+    box-sizing: border-box;
+    min-height: 40px;
+    padding: 7px var(--spacing-space-s);
+    background: #002f9c;
+    border-color: var(--border-on-color);
+    border-radius: 20px;
+}
+.pbot-panel .pbot-conv--space .pbot-compose .pbot-compose__pill:focus-within,
+.pbot-web .pbot-web__ask .pbot-compose .pbot-compose__pill:focus-within { border-color: var(--border-primary-default); }
+.pbot-panel .pbot-conv--space .pbot-compose__field,
+.pbot-web .pbot-web__ask .pbot-compose__field {
+    font-size: var(--type-b6);
+    font-weight: 500;
+}
+.pbot-panel .pbot-conv--space .pbot-compose__field::placeholder,
+.pbot-web .pbot-web__ask .pbot-compose__field::placeholder { color: var(--text-on-color-heading); }
+.pbot-panel .pbot-conv--space .pbot-disclaimer { line-height: var(--type-c2-lh); }
+.pbot-panel .pbot-conv--space .pbot-turn--bot .pbot-bubble,
+.pbot-web .pbot-conv--space .pbot-turn--bot .pbot-bubble {
+    margin-left: 17.161px;
+    min-height: 46px;
+    background: none;
+    border: var(--border-width-xs, 1px) solid transparent;
+    border-image: url('/pbot/askpbot/pbot-bubble-bot-bg.svg') 20 16 16 34 fill / 20px 16px 16px 34px / 0 0 0 17.161px;
+}
+.pbot-panel .pbot-conv--space .pbot-bubble--typing,
+.pbot-web .pbot-conv--space .pbot-bubble--typing { align-items: center; }
+.pbot-panel .pbot-conv--space .pbot-turn--bot .pbot-bubble::before,
+.pbot-web .pbot-conv--space .pbot-turn--bot .pbot-bubble::before {
+    left: -17.597px;
+    top: 0.0655px;
+    width: 16.0606px;
+    height: 15.591px;
+    transform: rotate(90deg);
+}
+@supports (-webkit-mask-box-image: none) or (mask-border: none) {
+.pbot-panel .pbot-conv--space .pbot-turn--bot .pbot-bubble.pbot-markdown.is-latest::after,
+    .pbot-web .pbot-conv--space .pbot-turn--bot .pbot-bubble.pbot-markdown.is-latest::after {
+        inset: -1px -1px -1px calc(-1px - 17.161px);
+        padding: 0;
+        border-radius: 0;
+        -webkit-mask: none;
+                mask: none;
+        -webkit-mask-box-image: url('/pbot/askpbot/pbot-bubble-bot-ring.svg') 20 16 16 34 / 20px 16px 16px 34px;
+                mask-border: url('/pbot/askpbot/pbot-bubble-bot-ring.svg') 20 16 16 34 / 20px 16px 16px 34px;
+    }
+}
+.pbot-panel .pbot-conv--space .pbot-turn--user .pbot-bubble:not(.pbot-imgmsg),
+.pbot-web .pbot-conv--space .pbot-turn--user .pbot-bubble:not(.pbot-imgmsg) {
+    margin-right: 16.41px;
+    background: none;
+    border: var(--border-width-xs, 1px) solid transparent;
+    border-image: url('/pbot/askpbot/pbot-bubble-user-bg.svg') 20 33 16 16 fill / 20px 33px 16px 16px / 0 16.41px 0 0;
+}
+.pbot-panel .pbot-conv--space .pbot-turn--user .pbot-bubble:not(.pbot-imgmsg)::after,
+.pbot-web .pbot-conv--space .pbot-turn--user .pbot-bubble:not(.pbot-imgmsg)::after { content: none; }
+.pbot-panel .pbot-conv--space .pbot-turn--user .pbot-bubble:not(.pbot-imgmsg):not(.is-playing)::before,
+.pbot-web .pbot-conv--space .pbot-turn--user .pbot-bubble:not(.pbot-imgmsg):not(.is-playing)::before {
+    content: '';
+    position: absolute;
+    left: calc(100% + 1.1974px);
+    right: auto;
+    top: 0.3691px;
+    width: 16.0624px;
+    height: 14.9838px;
+    clip-path: none;
+    background: url('/pbot/askpbot/pbot-bubble-tail-user.svg') center / contain no-repeat;
+    transform: scaleX(-1) rotate(90deg);
+    pointer-events: none;
+}
+.pbot-orbit {
+    --orbit-ring: 106.23px;
+    --orbit-pbot: 116px;
+    position: relative;
+    flex: none;
+    height: 116px;
+    transform-origin: center top;
+    transition: height var(--motion-base, 0.25s) var(--ease-out, ease),
+                scale var(--motion-base, 0.25s) var(--ease-out, ease);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.pbot-orbit__glow {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: calc(var(--orbit-pbot) * 1.397);
+    height: calc(var(--orbit-pbot) * 1.397);
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--space-glow-base) 45%, transparent);
+    filter: blur(32px);
+}
+.pbot-orbit__face { position: relative; display: block; width: var(--orbit-pbot); height: var(--orbit-pbot); }
+.pbot-orbit__face .pbot-podium__canvas {
+    filter:
+        drop-shadow(0.5px 0 #0b5851)
+        drop-shadow(-0.5px 0 #0b5851)
+        drop-shadow(0 0.5px #0b5851)
+        drop-shadow(0 -0.5px #0b5851);
+}
+.pbot-orbit__face {
+    transition: translate var(--motion-base, 0.25s) var(--ease-out, ease),
+                rotate var(--motion-base, 0.25s) var(--ease-out, ease);
+}
+.pbot-conv--space.is-compact .pbot-orbit {
+    scale: 0.62;
+    height: 72px;
+}
+.pbot-panel .pbot-conv--space .pbot-orbit {
+    --orbit-pbot: 131.04px;
+    --orbit-accent-y: 24px;
+    height: 144px;
+    padding-top: 26.4px;
+}
+.pbot-panel .pbot-conv--space .pbot-orbit__glow { display: none; }
+.pbot-panel .pbot-conv--space.is-compact .pbot-orbit { height: 89px; }
+.pbot-orbit__face .pbot-podium__canvas {
+    --orbit-canvas: calc(var(--orbit-pbot) / 0.7);
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: var(--orbit-canvas);
+    height: var(--orbit-canvas);
+    margin-left: calc(var(--orbit-canvas) / -2);
+    margin-top: calc(var(--orbit-canvas) / -2);
+    transform-origin: center;
+}
+.pbot-orbit__spark { position: absolute; display: block; }
+.pbot-orbit__spark--1 { left: calc(50% - 67.2px); top: var(--orbit-accent-y, 0px); width: 14.08px; height: 14.08px; }
+.pbot-orbit__spark--2 { left: calc(50% + 59px); top: calc(var(--orbit-accent-y, 0px) + 50px); width: 7.936px; height: 7.936px; }
+.pbot-orbit__lines {
+    position: absolute;
+    display: block;
+    left: calc(50% + 75.8px - 20.552px);
+    top: 7.776px;
+    width: 41.1031px;
+    height: 35.0271px;
+    transform: rotate(39.03deg);
+    pointer-events: none;
+}
+.pbot-orbit__chip {
+    flex: none;
+    align-self: center;
+    max-width: 100%;
+    margin: 0;
+    padding: 5px var(--spacing-space-s);
+    background: var(--space-chip-bg);
+    border: var(--border-width-xs) solid var(--surface-general-default-secondary);
+    border-radius: var(--corner-radius-corner-rounded);
+    color: var(--text-on-color-heading);
+    font-size: var(--type-c2);
+    line-height: var(--type-c2-lh);
+    font-weight: 700;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.pbot-conv__head .pbot-conv__brand { min-width: 0; }
+.pbot-conv__brand .pbot-orbit__chip {
+    flex: 0 1 auto;
+    min-width: 0;
+    padding: 4px var(--spacing-space-s);
+    border-color: var(--border-on-color);
+    font-size: var(--type-b8);
+    line-height: var(--type-b8-lh);
+    font-weight: 500;
+}
+.pbot-orbit__chip[contenteditable] { cursor: text; }
+.pbot-orbit__chip[contenteditable]:hover { border-color: var(--space-ring); }
+.pbot-orbit__chip[contenteditable]:focus {
+    overflow: visible;
+    text-overflow: clip;
+    background: var(--space-bubble);
+    border-color: var(--space-ring);
+    outline: none;
+}
+.pbot-conv--space .pbot-turn--bot .pbot-bubble {
+    position: relative;
+    background: var(--space-bubble);
+    border-color: var(--space-bubble-ring);
+    border-radius: var(--corner-radius-corner-xl);
+    border-top-left-radius: 0;
+    color: var(--space-ink);
+}
+.pbot-conv--space .pbot-turn--bot .pbot-bubble::before {
+    content: '';
+    position: absolute;
+    left: -16.217px;
+    top: 1.287px;
+    width: 15.622px;
+    height: 15.148px;
+    transform: rotate(-90deg);
+    background: url('/pbot/askpbot/pbot-bubble-tail.svg') center / contain no-repeat;
+    pointer-events: none;
+}
+.pbot-conv--space .pbot-bubble--typing span { background: var(--space-ink-dim); }
+.pbot-conv--space .pbot-turn__acts { justify-content: flex-end; }
+.pbot-conv--space .pbot-turn__acts button { color: var(--space-ink-dim); }
+.pbot-conv--space .pbot-turn__acts button:hover,
+.pbot-conv--space .pbot-turn__acts button.is-liked { color: var(--text-on-color-heading); }
+.pbot-conv--space .pbot-suggest__divider { color: var(--space-ink-dim); }
+.pbot-conv--space .pbot-suggest__divider::before,
+.pbot-conv--space .pbot-suggest__divider::after { background: var(--space-hairline); }
+.pbot-conv--space .pbot-disclaimer { color: var(--space-disclaimer); }
+.pbot-conv--space .pbot-markdown code { background: var(--space-code-bg); }
+.pbot-conv--space .pbot-compose { padding: 0; }
+.pbot-voicebar {
+    --wave-panel: #101b3d;
+    --wave-head: #ffd633;
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-xs);
+}
+.pbot-wave-panel {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    align-self: stretch;
+    padding-inline: var(--spacing-space-xs);
+    background: var(--wave-panel);
+    border-radius: var(--corner-radius-corner-lg);
+    overflow: hidden;
+}
+.pbot-wave {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    min-width: 0;
+    overflow: hidden;
+}
+.pbot-wave__bar {
+    flex: none;
+    width: 3px;
+    border-radius: var(--corner-radius-corner-rounded);
+    background: var(--surface-warning-default);
+}
+.pbot-wave.is-done .pbot-wave__bar { background: var(--text-on-color-heading); opacity: 0.55; }
+.pbot-wave__head {
+    position: absolute;
+    top: 50%;
+    width: 3px;
+    height: 34px;
+    margin-top: -17px;
+    border-radius: var(--corner-radius-corner-rounded);
+    background: var(--wave-head);
+    pointer-events: none;
+    transition: left 0.08s linear;
+}
+.pbot-wave-panel.is-playing::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--play-progress, 0%);
+    background: color-mix(in srgb, var(--wave-head) 16%, transparent);
+    pointer-events: none;
+    transition: width 0.08s linear;
+}
+.pbot-voicemsg { position: relative; overflow: hidden; }
+.pbot-voicemsg.is-playing::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--play-progress, 0%);
+    background: color-mix(in srgb, var(--text-on-color-heading) 18%, transparent);
+    pointer-events: none;
+    transition: width 0.08s linear;
+}
+.pbot-voicemsg > * { position: relative; }
+.pbot-voicebar__time {
+    flex: none;
+    font-size: var(--type-b5);
+    line-height: var(--type-b5-lh);
+    font-weight: 700;
+    color: var(--text-on-color-heading);
+    font-variant-numeric: tabular-nums;
+}
+.pbot-voicebar__time.is-rec { color: var(--surface-warning-default); }
+.pbot-voicemsg {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-xs);
+}
+.pbot-voicemsg .pbot-wave__bar { background: var(--text-on-color-heading); }
+.pbot-voicemsg__time {
+    flex: none;
+    font-size: var(--type-c2);
+    line-height: var(--type-c2-lh);
+    font-weight: 600;
+    color: var(--text-on-color-heading);
+    font-variant-numeric: tabular-nums;
+}
+.pbot-voicemsg__play { --ib-border: var(--text-on-color-heading); }
+.pbot-voicemsg__play .icon-btn__face {
+    background: var(--surface-primary-default);
+    border-color: var(--text-on-color-heading);
+    color: var(--text-on-color-heading);
+}
+.pbot-voicemsg__play.is-playing .icon-btn__face,
+.pbot-voice-play.is-playing .icon-btn__face {
+    background: var(--text-on-color-heading);
+    color: var(--surface-primary-default);
+}
+.pbot-filepicker {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+.pbot-composer__error {
+    margin: 0;
+    font-size: var(--type-c2);
+    line-height: var(--type-c2-lh);
+    color: var(--surface-warning-default);
+    text-align: center;
+}
+.pbot-attach-host { display: flex; flex-direction: column; }
+.pbot-attach {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: var(--spacing-space-m);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    padding-block: var(--border-width-xs);
+}
+.pbot-attach::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.pbot-attach__chip {
+    flex: 0 0 calc(50% - (var(--spacing-space-m) / 2));
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-xxs);
+    padding: var(--spacing-space-xs) var(--spacing-space-m) var(--spacing-space-xs) var(--spacing-space-xs);
+    background: color-mix(in srgb, var(--text-on-color-heading) 28%, transparent);
+    border: var(--border-width-xs) solid color-mix(in srgb, var(--text-on-color-heading) 28%, transparent);
+    border-radius: var(--corner-radius-corner-xl);
+}
+.pbot-attach.is-single .pbot-attach__chip { flex: 1 1 100%; }
+.pbot-attach__thumb {
+    flex: none;
+    width: 33px;
+    height: 33px;
+    border-radius: var(--corner-radius-corner-md);
+    object-fit: cover;
+}
+.pbot-attach__meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pbot-attach__name {
+    font-size: var(--type-b5);
+    line-height: var(--type-b5-lh);
+    font-weight: 600;
+    color: var(--text-on-color-heading);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.pbot-attach__hint {
+    font-size: var(--type-c2);
+    line-height: var(--type-c2-lh);
+    color: var(--text-primary-default);
+}
+.pbot-attach__chip .icon-btn { flex: none; }
+.pbot-imgmsg { display: flex; flex-direction: column; gap: var(--spacing-space-xs); }
+.pbot-imgmsg__grid { display: flex; flex-wrap: wrap; gap: var(--spacing-space-xs); }
+.pbot-imgmsg__img {
+    display: block;
+    width: 107px;
+    height: 107px;
+    object-fit: cover;
+    border: var(--border-width-xs) solid var(--surface-primary-default);
+    border-radius: var(--corner-radius-corner-md);
+    background: var(--surface-general-default);
+}
+.pbot-imgmsg__open {
+    display: block;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: zoom-in;
+    border-radius: var(--corner-radius-corner-md);
+}
+.pbot-imgmsg__open:focus-visible {
+    outline: 3px solid var(--text-on-color-heading);
+    outline-offset: 2px;
+}
+.pbot-modal__card--viewer {
+    align-items: stretch;
+    gap: var(--spacing-space-s);
+    padding: var(--spacing-space-2xl);
+    border-color: var(--border-general-default);
+    text-align: left;
+    overflow: hidden;
+}
+.pbot-viewer__head {
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-space-s);
+}
+.pbot-viewer__title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin: 0;
+    font-size: var(--type-b1);
+    line-height: var(--type-b1-lh);
+    font-weight: 600;
+    color: var(--text-default-heading);
+}
+.pbot-viewer__frame {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: var(--border-width-xs) solid var(--border-default);
+    border-radius: var(--corner-radius-corner-lg);
+    overflow: hidden;
+}
+.pbot-viewer__img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+.pbot-viewer__name {
+    margin: 0;
+    font-size: var(--type-b5);
+    line-height: var(--type-b5-lh);
+    color: var(--text-default-caption);
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.pbot-viewer__close { --ib-glyph: var(--text-default-heading); }
+.pbot-viewer__close::before { display: none; }
+.pbot-viewer__close.icon-btn:hover:not(:disabled):not(.is-disabled):not(:active):not(.is-active):not(.is-loading) .icon-btn__face,
+.pbot-viewer__close.icon-btn:active:not(:disabled):not(.is-disabled) .icon-btn__face { transform: none; }
+.pbot-viewer__close .icon-btn__face.btn-raise { animation: none; transform: none; }
+.pbot-viewer__close .icon-btn__face {
+    background: transparent;
+    border-color: transparent;
+    transform: none;
+}
+.pbot-viewer__close:hover:not(:disabled) { --ib-glyph: var(--text-default-body); }
+.pbot-imgmsg__caption {
+    margin: 0;
+    font-size: var(--type-b1);
+    line-height: var(--type-b1-lh);
+    color: var(--text-on-color-heading);
+}
+.pbot-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1300;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--spacing-space-m);
+}
+.pbot-web.is-ask .pbot-web__main:has(.pbot-modal:not([style*="display: none"])) {
+    z-index: 1300;
+}
+.pbot-modal__scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.4); }
+.pbot-modal__card {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--spacing-space-s);
+    width: 430px;
+    max-width: calc(100vw - 32px);
+    max-height: 100%;
+    overflow-y: auto;
+    padding: var(--spacing-space-xl) var(--spacing-space-m);
+    background: var(--surface-general-default);
+    border: 1px solid var(--border-primary-default);
+    border-radius: var(--corner-radius-corner-rounded);
+    text-align: center;
+}
+.pbot-modal__art { width: 108px; height: 108px; object-fit: contain; }
+.pbot-modal__title { font-size: 24px; font-weight: 500; line-height: 36px; color: var(--text-default-heading); }
+.pbot-modal__text { font-size: 16px; line-height: 24px; color: var(--text-default-body); }
+.pbot-modal__btns { display: flex; gap: var(--spacing-space-xs); justify-content: center; width: 100%; margin-top: var(--spacing-space-xs); }
+@media (max-width: 480px) {
+.pbot-panel { inset: 0; width: 100vw; border-radius: 0; }
+.pbot-panel--left { left: 0; }
+}
+.home-pbot {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    width: 150px;
+    height: 150px;
+    z-index: 40;
+    appearance: none;
+    border: 0;
+    background: none;
+    padding: 0;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform var(--motion-base, 0.25s) var(--ease-out, ease);
+}
+.home-pbot:hover { transform: scale(1.06); }
+.home-pbot__diver {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: block;
+}
+.home-pbot__canvas {
+    width: 100%; height: 100%; display: block; pointer-events: none;
+    transform-origin: 70% 80%;
+    filter:
+        drop-shadow(0.5px 0 #0b5851)
+        drop-shadow(-0.5px 0 #0b5851)
+        drop-shadow(0 0.5px #0b5851)
+        drop-shadow(0 -0.5px #0b5851);
+    transition: transform 0.34s var(--ease-deck, cubic-bezier(0.34, 1.56, 0.64, 1)),
+                opacity 0.28s var(--ease-out, ease);
+}
+.home-pbot.is-away { pointer-events: none; }
+.home-pbot.is-away .home-pbot__canvas { transform: scale(0.06) rotate(16deg); opacity: 0; }
+.home-pbot__poof {
+    position: absolute;
+    inset: 6% 6% 10% 6%;
+    border-radius: 50%;
+    background: radial-gradient(circle at 52% 56%,
+        rgba(255, 255, 255, 0.95) 0%,
+        rgba(213, 237, 251, 0.65) 52%,
+        rgba(213, 237, 251, 0) 72%);
+    opacity: 0;
+    transform: scale(0.5);
+    pointer-events: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+.home-pbot.is-away .home-pbot__poof { animation: pbotPoof 0.5s var(--ease-out, ease) forwards; }
+}
+@media (max-width: 1024px) {
+.home-pbot { display: none; } }
+.pbot-suggest {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-space-xs);
+    margin-top: auto;
+    padding-top: var(--spacing-space-m);
+}
+.pbot-suggest__divider {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-space-xs);
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: var(--type-c2);
+    line-height: var(--type-c2-lh);
+    color: var(--text-default-caption);
+    cursor: pointer;
+}
+.pbot-suggest__divider > span {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-space-3xs);
+}
+.pbot-suggest__divider svg {
+    flex: none;
+    transition: transform var(--motion-base) var(--ease-out);
+}
+.pbot-suggest.is-collapsed .pbot-suggest__divider svg { transform: rotate(-90deg); }
+.pbot-suggest__divider:focus-visible {
+    outline: 3px solid var(--surface-primary-default-subtle-hover);
+    outline-offset: 2px;
+    border-radius: var(--corner-radius-corner-md);
+}
+.pbot-suggest__list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-space-xs);
+    overflow: hidden;
+}
+.pbot-suggest__divider::before,
+.pbot-suggest__divider::after {
+    content: '';
+    flex: 1;
+    height: var(--border-width-xs, 1px);
+    background: var(--border-general-default);
+}
+.pbot-suggest__chip {
+    padding: var(--spacing-space-xs) var(--spacing-space-m);
+    border: var(--border-width-xs, 1px) solid var(--border-default);
+    border-radius: var(--corner-radius-corner-pill, 999px);
+    background: var(--surface-general-default-tertiary);
+    color: var(--text-primary-default);
+    font: inherit; font-size: var(--type-b5); line-height: var(--type-b5-lh); font-weight: 500;
+    text-align: left; cursor: pointer;
+    transition: background var(--motion-base) var(--ease-out), transform var(--motion-base) var(--ease-out);
+}
+.pbot-suggest__chip:hover { background: var(--surface-primary-default-subtle, #e8fbe8); transform: translateY(-1px); }
+.pbot-markdown p { margin: 0 0 var(--spacing-space-xs); }
+.pbot-markdown p:last-child { margin-bottom: 0; }
+.pbot-markdown ul { margin: var(--spacing-space-xxs) 0 var(--spacing-space-xs); padding-left: 18px; }
+.pbot-markdown li { margin: var(--spacing-space-3xs) 0; }
+.pbot-markdown strong { font-weight: 700; }
+.pbot-markdown a { color: var(--text-primary-default); text-decoration: underline; }
+.pbot-markdown code { padding: 1px 5px; border-radius: 4px; background: rgba(0, 0, 0, 0.06); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+.pbot-markdown {
+    --pbot-code-bg: #1e293b;
+    --pbot-code-ink: #e2e8f0;
+}
+.pbot-markdown pre { margin: 6px 0; padding: 10px var(--spacing-space-s); border-radius: 10px; background: var(--pbot-code-bg); overflow-x: auto; }
+.pbot-markdown pre code { padding: 0; background: none; color: var(--pbot-code-ink); }
+.pbot-turn__acts button.is-liked { color: var(--text-primary-default); }
+textarea.pbot-compose__field {
+    height: 24px;
+    min-height: 24px;
+    max-height: 120px;
+    padding: 0;
+    line-height: 24px;
+    resize: none;
+    overflow-y: auto;
+}
+
+
+/* ── resources/css/pandai/modals.css ── */
+
+.pbot-panel__close {
+    --close-ring: var(--icon-primary-default);
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface-general-default);
+    color: var(--close-ring);
+    box-shadow: inset 0 0 0 1px var(--close-ring);
+    cursor: pointer;
+}
+.pbot-panel__close svg {
+    width: 18px;
+    height: 18px;
+}
+
+
+/* ── resources/css/pandai/motion.css ── */
+
+.btn__face.btn-raise,
+.icon-btn__face.btn-raise {
+    animation: btnPrimaryRaise 0.34s linear;
+}
+.icon-btn--s .icon-btn__face.btn-raise {
+    animation-name: btnPrimaryRaiseS;
+}
+.btn:has(.btn__face).is-loading.is-navigating .btn__face > *,
+.icon-btn.is-loading.is-navigating .icon-btn__face > * {
+    opacity: 1;
+}
+.btn-gamefeel {
+    --btn-edge: 4px;
+    --btn-press-drop: 3px;
+    --btn-hover-raise: 2px;
+    --motion-release: 0.25s;
+    --ease-boing: cubic-bezier(0.34, 1.8, 0.5, 1);
+}
+.pbot-web__hero-title.is-typing::after,
+.pbot-web__hero-sub.is-typing::after {
+    content: '';
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: currentColor;
+    animation: caretBlink 0.8s steps(1) infinite;
+}
+@media (prefers-reduced-motion: no-preference) {
+.pbot-scene--space .pbot-scene__spark,
+    .pbot-orbit__spark {
+        animation: pbotStarBling 2.2s ease-in-out infinite;
+        will-change: opacity, transform;
+    }
+.pbot-orbit__spark--1 { animation-duration: 2.6s; animation-delay: -1.1s; }
+.pbot-orbit__spark--2 { animation-duration: 3.1s; animation-delay: -0.3s; }
+.pbot-orbit__face {
+        animation: pbotHeroFloat 3.8s ease-in-out infinite;
+        will-change: transform;
+    }
+.pbot-orbit__lines {
+        transform-origin: 45% 100%;
+        animation: pbotThinkLines 1.8s var(--ease-out, ease) infinite;
+        will-change: scale, opacity;
+    }
+.pbot-orbit__face.is-talking .pbot-orbit__lines { animation-duration: 0.9s; }
+.pbot-compose__sendwrap.is-ready .pbot-compose__send {
+        animation: pbotSendNudge 3s var(--ease-out, ease) infinite;
+    }
+.pbot-compose__sendwrap.is-ready .pbot-compose__send:hover,
+    .pbot-compose__sendwrap.is-ready .pbot-compose__send:active { animation: none; }
+.pbot-topbar {
+        transition:
+            background var(--motion-base) var(--ease-out),
+            border-color var(--motion-base) var(--ease-out),
+            color var(--motion-base) var(--ease-out),
+            filter var(--motion-base) var(--ease-out);
+    }
+.pbot-web__spark--a { animation-duration: 2.8s; animation-delay: -0.6s; }
+.pbot-web__spark--b { animation-duration: 3.4s; animation-delay: -1.9s; }
+.pbot-web__spark--c { animation-duration: 2.5s; animation-delay: -1.2s; }
+.pbot-web__spark--d { animation-duration: 2.6s; animation-delay: -0.2s; }
+.pbot-web__spark--e { animation-duration: 3.1s; animation-delay: -1.5s; }
+}
+
+
+/* ── keyframes ── */
+
+@keyframes pbotDeckPeek {
+        0%, 78%, 100% { transform: translateY(-8px) scale(0.9); }
+        88%           { transform: translateY(-15px) rotate(-4deg) scale(0.93); }
+    }
+
+@keyframes pbotPodiumPop {
+    from { transform: translate(-50%, 44px); opacity: 0; }
+    to   { transform: translate(-50%, 0); opacity: 1; }
+}
+
+@keyframes pbotBubbleIn {
+        from { opacity: 0; transform: translateY(10px) scale(0.96); }
+        to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+@keyframes pbotAnalyze {
+        0%   { background-position: -40% 0; }
+        100% { background-position: 140% 0; }
+    }
+
+@keyframes pbotFloat {
+        0%, 100% { transform: translateY(0); }
+        50%      { transform: translateY(-1px); }
+    }
+
+@keyframes pbotReplyShine {
+        0%        { background-position: 150% 0; }
+        26%, 100% { background-position: -60% 0; }
+    }
+
+@keyframes pbot-typing {
+        0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+        30% { opacity: 1; transform: translateY(-3px); }
+    }
+
+@keyframes pbotPoof {
+    0%   { opacity: 0;    transform: scale(0.45); }
+    35%  { opacity: 0.95; transform: scale(1.05); }
+    100% { opacity: 0;    transform: scale(1.7); }
+}
+
+@keyframes btnPrimaryRaise {
+    0%   { transform: translateY(-3px); }
+    38%  { transform: translateY(-10px); }
+    62%  { transform: translateY(-4.6px); }
+    80%  { transform: translateY(-6.6px); }
+    100% { transform: translateY(-6px); }
+}
+
+@keyframes btnPrimaryRaiseS {
+    0%   { transform: translateY(-3px); }
+    38%  { transform: translateY(-5.3px); }
+    62%  { transform: translateY(-3.5px); }
+    80%  { transform: translateY(-4.2px); }
+    100% { transform: translateY(-4px); }
+}
+
+@keyframes caretBlink {
+    0%, 50% { opacity: 1; }
+    50.01%, 100% { opacity: 0; }
+}
+
+@keyframes pbotStarBling {
+    0%   { opacity: 0; transform: scale(0.2)  rotate(0deg); }
+    45%  { opacity: 1; transform: scale(1.18) rotate(50deg); }
+    100% { opacity: 0; transform: scale(0.2)  rotate(90deg); }
+}
+
+@keyframes pbotHeroFloat {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-4px); }
+}
+
+@keyframes pbotThinkLines {
+    0%       { scale: 0.72; opacity: 0.45; }
+    18%      { scale: 1.12; opacity: 1; }
+    30%      { scale: 0.96; }
+    40%, 64% { scale: 1;    opacity: 1; }
+    100%     { scale: 0.72; opacity: 0.45; }
+}
+
+@keyframes pbotSendNudge {
+    0%, 62%, 100% { transform: translateY(0); }
+    72%           { transform: translateY(-4px); }
+    84%           { transform: translateY(0); }
+    91%           { transform: translateY(-1.5px); }
+}
+```
 
 ### 6.6 Evals
 
 #### `evals/run.ts`  
-_573 lines_
+_629 lines_
 
 ```ts
 import { config } from "dotenv";
@@ -4494,7 +7602,14 @@ import {
   validateAttachment,
   validateShape,
 } from "../lib/guardrails";
-import { deriveTitle, groupByDate, type StoredConversation } from "../lib/history";
+import {
+  deriveTitle,
+  groupByDate,
+  loadConversations,
+  renameConversation,
+  saveConversation,
+  type StoredConversation,
+} from "../lib/history";
 import { MAX_IMAGE_BASE64_CHARS } from "../lib/limits";
 import { PROMPT_LEAK_SENTINEL } from "../lib/prompt";
 import type { ImageMediaType } from "../lib/types";
@@ -4734,6 +7849,55 @@ const OFFLINE_CASES: OfflineCase[] = [
             deriveTitle([{ id: "1", role: "assistant", content: "hi" }]) === "New Chat",
         },
       ];
+    },
+  },
+  {
+    id: "history-persistence",
+    description:
+      "Saved history drops what localStorage cannot hold (image bytes, a voice clip's blob URL) but keeps that they were sent, and refuses a blank rename",
+    run: () => {
+      // lib/history.ts only touches window.localStorage; an in-memory one is
+      // enough to exercise the real save path without a browser.
+      const store = new Map<string, string>();
+      const g = globalThis as unknown as { window?: unknown };
+      g.window = {
+        localStorage: {
+          getItem: (k: string) => store.get(k) ?? null,
+          setItem: (k: string, v: string) => void store.set(k, v),
+        },
+      };
+      try {
+        const base: StoredConversation = {
+          id: "c1",
+          title: "Voice and image",
+          createdAt: 1,
+          updatedAt: 2,
+          messages: [
+            { id: "1", role: "user", content: "what is a prime", voice: { seconds: 3, bars: [4, 9, 4], url: "blob:x" } },
+            { id: "2", role: "user", content: "and this?", image: { mediaType: "image/png", data: "AAAA" } },
+          ],
+        };
+        saveConversation(base);
+        const first = loadConversations()[0];
+        // Re-save what came back, as reopening a chat and sending again does.
+        saveConversation({ ...first, updatedAt: 3 });
+        const again = loadConversations()[0];
+        const [voiceTurn, imageTurn] = again.messages;
+        return [
+          { name: "voice keeps its waveform and length", pass: voiceTurn.voice?.seconds === 3 && voiceTurn.voice.bars.length === 3 },
+          { name: "voice drops its blob: URL", pass: voiceTurn.voice?.url === undefined },
+          { name: "image drops its bytes", pass: imageTurn.image === undefined },
+          { name: "image marker survives a re-save", pass: imageTurn.imagePlaceholder === true },
+          { name: "blank rename refused", pass: renameConversation("c1", "   ") === false },
+          {
+            name: "rename collapses whitespace",
+            pass: renameConversation("c1", "  Primes   and pictures ") && loadConversations()[0].title === "Primes and pictures",
+          },
+          { name: "unknown id refused", pass: renameConversation("nope", "x") === false },
+        ];
+      } finally {
+        delete g.window;
+      }
     },
   },
   {
@@ -5057,6 +8221,313 @@ main().catch((error) => {
 });
 ```
 
+
+---
+
+### 6.7 Design pipeline
+
+How `app/pbot.css` and `public/pbot/` are produced. The binaries in `public/pbot/` (art, `icons.svg`, `pbot.riv`, `rive.wasm`) are not inlined; copy that directory as-is.
+
+#### `scripts/pbot-design/sync.mjs`  
+_209 lines_
+
+```js
+// Pulls the AskPBot design out of pandai.question.uiux and into this repo.
+//
+//   node scripts/pbot-design/sync.mjs        (PANDAI_UIUX=<path> to override)
+//
+// Writes, all generated — edit this script, never the outputs:
+//   app/pbot.css            the source's own rules for every class in classes.json
+//   public/pbot/**          the images those rules and the components reference
+//   public/pbot/icons.svg   the DS sprite cut down to the glyphs used here
+//   public/pbot/rive/*      pbot.riv, and the runtime's rive.wasm (see PBotRive.tsx)
+//
+// The CSS is EXTRACTED, not rewritten. A selector survives only if every class in
+// it is one the source actually renders in a state this port ships (classes.json,
+// from collect-classes.mjs) — so Math Drill, the report modal and the ds-scroll
+// widget fall away on their own, and nothing has to be hand-pruned. Host-specific
+// overrides (this app has no Pandai header to subtract) live in app/pbot-host.css.
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const REPO = path.resolve(here, '../..');
+const UIUX = path.resolve(process.env.PANDAI_UIUX ?? path.join(REPO, '../pandai.question.uiux'));
+const postcss = createRequire(path.join(UIUX, 'package.json'))('postcss');
+
+const IMAGES = path.join(UIUX, 'themes/app/assets/images');
+const PUBLIC = path.join(REPO, 'public/pbot');
+const CSS_OUT = path.join(REPO, 'app/pbot.css');
+
+// Source stylesheet, in its own cascade order (resources/css/app.css). dark.css and
+// navbar.css are skipped: the surfaces keep their brand colours in dark mode (see
+// README), and the navbar is the host app's chrome.
+const FILES = ['tokens', 'base', 'components', 'modals', 'motion', 'responsive'];
+
+// Rendered in the source, deliberately not ported. Each is a SCOPE.md row.
+const EXCLUDE = [
+  /^pbot-md/, /^pbot-web__math$/, /^pbot-web__rail-md$/, /^pbot-web__rule$/, // Math Drill
+  /^pbot-deck__card--math$/, /^pbot-topbar__chip$/, /^pbot-modal__card--success$/, /^pbot-modal__bar$/,
+  /^ds-scroll/, /^pbot-compose__scroll$/,                                     // native scrolling
+  /^pbot-report/, /^pbot-fb__/, /^pbot-modal__art--think$/, /^pbot-modal__title--report$/, // report modals
+];
+// Classes the collector cannot reach (states it does not drive) but this port uses.
+const EXTRA = [
+  'home-pbot', 'home-pbot__poof', 'home-pbot__diver', 'home-pbot__canvas', 'pbot-panel--left',
+  'btn-gamefeel', 'is-playing', 'is-live', 'is-away', 'is-poof',
+];
+// Body/page modifiers that start with `is-` but belong to the source's host pages.
+const HOST_STATES = new Set(['is-lab-fixed', 'is-math', 'is-drill']);
+
+// Referenced from component markup (the CSS references are found automatically).
+const MARKUP_IMAGES = [
+  'askpbot/web-hero-glow.svg', 'askpbot/web-hero-halo.svg', 'askpbot/web-hero-spark.svg',
+  'askpbot/web-hero-spark-gold.svg', 'askpbot/sparkle.svg', 'askpbot/tab-ask-active.png',
+  'askpbot/empty-state.png', 'askpbot/chat-sparkle-scene.svg', 'askpbot/chat-sparkle-10.svg',
+  'askpbot/chat-sparkle-9.svg', 'askpbot/chat-sparkle-white.svg', 'askpbot/chat-sparkle-yellow.svg',
+  'askpbot/chat-motion-lines.svg', 'askpbot/askpbot-wordmark.png', 'askpbot/pbot-face.svg',
+  'askpbot/mathdrill-pod.png', 'profile/avatar-illustration.png',
+];
+const ICONS = [
+  'arrow-up', 'check', 'chevron-btn-m', 'chevron-down', 'chevron-left', 'clipboard', 'edit', 'image',
+  'maximize-2', 'mic', 'more-vertical', 'play-filled', 'refresh-cw', 'square', 'thumbs-up', 'trash-2', 'x',
+];
+
+// ── CSS ─────────────────────────────────────────────────────────────────────
+const collected = JSON.parse(fs.readFileSync(path.join(here, 'classes.json'), 'utf8')).classes;
+const allowed = new Set([...collected, ...EXTRA].filter((c) => !EXCLUDE.some((re) => re.test(c))));
+const isAllowed = (c) => allowed.has(c) || (c.startsWith('is-') && !HOST_STATES.has(c));
+
+function keepSelector(sel) {
+  if (/data-theme|\.dark\b/.test(sel)) return false;
+  // Element selectors only — `\bbody\b` would also match the class `pbot-web__side-body`.
+  if (/(^|[\s>+~(,])(body|html)(?![\w-])|:root/.test(sel) && !sel.includes('.btn-gamefeel')) return false;
+  // :not(…) only narrows a match, so an excluded class inside it is harmless.
+  const subject = sel.replace(/:not\(([^()]|\([^()]*\))*\)/g, '');
+  const classes = [...subject.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)].map((m) => m[1]);
+  return classes.length > 0 && classes.every(isAllowed) && classes.some((c) => !c.startsWith('is-'));
+}
+
+const usedVars = new Set();
+const usedKeyframes = new Set();
+const keyframes = new Map();
+const rootDecls = new Map();
+
+function scan(decl) {
+  for (const m of decl.value.matchAll(/var\(\s*(--[\w-]+)/g)) usedVars.add(m[1]);
+  if (decl.prop === 'animation' || decl.prop === 'animation-name') {
+    for (const tok of decl.value.split(/[\s,]+/)) usedKeyframes.add(tok);
+  }
+}
+
+function filter(src, dst, file) {
+  src.each((node) => {
+    if (node.type === 'rule') {
+      if (node.selector.includes(':root')) {
+        if (node.selector.trim() === ':root' && (file === 'tokens' || file === 'base')) {
+          // Braces matter: a walk callback that returns `false` stops the walk.
+          node.walkDecls((d) => {
+            if (d.prop.startsWith('--')) rootDecls.set(d.prop, d.value);
+          });
+        }
+        return;
+      }
+      const selectors = node.selectors.filter(keepSelector);
+      if (!selectors.length) return;
+      const rule = node.clone({ selectors });
+      rule.walkComments((c) => c.remove());
+      rule.walkDecls(scan);
+      rule.raws.before = '\n';
+      dst.append(rule);
+    } else if (node.type === 'atrule') {
+      if (node.name.endsWith('keyframes')) keyframes.set(node.params.trim(), node);
+      else if (['media', 'supports', 'container'].includes(node.name) && !/prefers-color-scheme/.test(node.params)) {
+        const at = node.clone({ nodes: [] });
+        filter(node, at, file);
+        if (at.nodes.length) { at.raws.before = '\n\n'; dst.append(at); }
+      }
+    }
+  });
+}
+
+const body = [];
+for (const file of FILES) {
+  const css = fs.readFileSync(path.join(UIUX, 'resources/css/pandai', `${file}.css`), 'utf8');
+  const section = postcss.root();
+  filter(postcss.parse(css, { from: `${file}.css` }), section, file);
+  if (section.nodes.length) body.push(`\n\n/* ── resources/css/pandai/${file}.css ── */`, section.toString());
+}
+
+const frames = [];
+for (const name of usedKeyframes) {
+  const kf = keyframes.get(name);
+  if (!kf) continue;
+  const c = kf.clone();
+  c.walkComments((x) => x.remove());
+  c.walkDecls(scan);
+  frames.push(c.toString());
+}
+
+// Design tokens, transitively: a token can be defined in terms of another.
+const tokens = new Map();
+for (let grew = true; grew; ) {
+  grew = false;
+  for (const v of [...usedVars]) {
+    if (tokens.has(v) || !rootDecls.has(v)) continue;
+    tokens.set(v, rootDecls.get(v));
+    for (const m of rootDecls.get(v).matchAll(/var\(\s*(--[\w-]+)/g)) {
+      if (!usedVars.has(m[1])) { usedVars.add(m[1]); grew = true; }
+    }
+  }
+}
+
+const commit = execSync('git rev-parse --short HEAD', { cwd: UIUX }).toString().trim();
+const cssAssets = new Set();
+let out = [
+  `/* GENERATED by scripts/pbot-design/sync.mjs from pandai.question.uiux@${commit}. Do not edit:`,
+  '   change the script (or app/pbot-host.css) and re-run it. */',
+  '',
+  ':root {',
+  ...[...tokens].sort().map(([k, v]) => `    ${k}: ${v};`),
+  '}',
+  ...body,
+  '\n\n/* ── keyframes ── */\n',
+  frames.join('\n\n'),
+  '',
+].join('\n');
+out = out
+  // Tailwind's theme() would resolve these too, but only if this app declared the same
+  // breakpoints; the fallbacks are the DS values, so inline them.
+  .replace(/theme\(--breakpoint-tablet(?:,\s*[^)]*)?\)/g, '764px')
+  .replace(/theme\(--breakpoint-desktop(?:,\s*[^)]*)?\)/g, '1320px')
+  .replace(/url\((['"]?)\/Themes\/app\/assets\/images\/([^'")]+)\1\)/g, (m, q, p) => {
+    cssAssets.add(p);
+    return `url(${q}/pbot/${p}${q})`;
+  });
+fs.writeFileSync(CSS_OUT, out);
+
+// ── images ──────────────────────────────────────────────────────────────────
+fs.rmSync(PUBLIC, { recursive: true, force: true });
+for (const rel of [...cssAssets, ...MARKUP_IMAGES]) {
+  const dst = path.join(PUBLIC, rel);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.copyFileSync(path.join(IMAGES, rel), dst);
+}
+
+// ── icon sprite ─────────────────────────────────────────────────────────────
+// The source sprite defines a few ids twice; <use> resolves to the FIRST, so take that.
+const sprite = fs.readFileSync(path.join(UIUX, 'themes/app/assets/icons/sprite.svg'), 'utf8');
+const symbols = ICONS.map((name) => {
+  const m = sprite.match(new RegExp(`<symbol id="ic-${name}"[\\s\\S]*?</symbol>`));
+  if (!m) throw new Error(`icon ${name} not in the source sprite`);
+  return m[0];
+});
+fs.writeFileSync(
+  path.join(PUBLIC, 'icons.svg'),
+  `<svg xmlns="http://www.w3.org/2000/svg" style="display:none">\n${symbols.join('\n')}\n</svg>\n`,
+);
+
+// ── Rive ────────────────────────────────────────────────────────────────────
+fs.mkdirSync(path.join(PUBLIC, 'rive'), { recursive: true });
+fs.copyFileSync(path.join(UIUX, 'themes/app/assets/rive/pbot.riv'), path.join(PUBLIC, 'rive/pbot.riv'));
+// The WASM must match the JS runtime byte for byte, so it comes from THIS repo's install
+// of @rive-app/canvas (pinned exact in package.json), never from the source repo's.
+fs.copyFileSync(path.join(REPO, 'node_modules/@rive-app/canvas/rive.wasm'), path.join(PUBLIC, 'rive/rive.wasm'));
+
+console.log(
+  `pbot.css: ${out.split('\n').length} lines, ${tokens.size} tokens, ${frames.length} keyframes · ` +
+  `${cssAssets.size + MARKUP_IMAGES.length} images · ${ICONS.length} icons · from uiux@${commit}`,
+);
+```
+
+#### `scripts/pbot-design/collect-classes.mjs`  
+_80 lines_
+
+```js
+// Records every class the source AskPBot UI actually renders, across the states
+// this port ships: idle hero, chat, streaming, a grown composer, the history
+// row's menu / rename / delete, a voice take (recording → recorded → sent), an
+// image attachment and its viewer, and the slide-in panel's home and chat.
+//
+// Rendered DOM rather than a grep of the Blade files, because <x-btn> and
+// <x-icon-btn> expand into classes (btn__face, icon-btn--l …) that never appear
+// in the templates themselves.
+//
+// Needs the source app running — from pandai.question.uiux:
+//   php artisan serve --port=8765
+// then, from this repo:
+//   node scripts/pbot-design/collect-classes.mjs
+// and re-run sync.mjs. Writes scripts/pbot-design/classes.json.
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const UIUX = path.resolve(process.env.PANDAI_UIUX ?? path.join(here, '../../../pandai.question.uiux'));
+const BASE = process.env.PANDAI_UIUX_URL ?? 'http://127.0.0.1:8765';
+// Playwright comes from the source repo, so this repo does not carry it.
+const { chromium } = createRequire(path.join(UIUX, 'package.json'))('playwright');
+
+const browser = await chromium.launch({
+  args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
+});
+const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ['microphone'] });
+const found = new Set();
+const ROOTS = ['.pbot-web-shell', '.pbot-panel', '.pbot-modal', '.pbot-scrim'];
+const grab = async (page) => {
+  const classes = await page.evaluate((roots) => {
+    const out = [];
+    for (const r of roots) {
+      document.querySelectorAll(r).forEach((root) => {
+        [root, ...root.querySelectorAll('*')].forEach((el) => el.classList?.forEach((c) => out.push(c)));
+      });
+    }
+    return out;
+  }, ROOTS);
+  classes.forEach((c) => found.add(c));
+};
+const settle = (page, ms) => page.waitForTimeout(ms);
+
+const p = await ctx.newPage();
+await p.goto(`${BASE}/lab/askpbot`, { waitUntil: 'networkidle' });
+await settle(p, 1500); await grab(p);
+await p.locator('.pbot-web__compose input').fill('hello'); await grab(p);
+await p.locator('.pbot-web__prompt').first().click(); await settle(p, 300); await grab(p);
+await settle(p, 4500); await grab(p);
+await p.locator('.pbot-web .pbot-compose textarea').fill('1\n2\n3\n4\n5\n6\n7'); await settle(p, 200); await grab(p);
+await p.locator('.pbot-web .pbot-compose textarea').fill('');
+await p.locator('.pbot-history__more').first().click(); await grab(p);
+await p.getByText('Rename').first().click(); await settle(p, 200); await grab(p);
+await p.locator('.pbot-history__acts .icon-btn').first().click();
+await p.getByText('Delete').first().click(); await settle(p, 200); await grab(p);
+await p.locator('.pbot-history__acts .icon-btn').first().click();
+await p.locator('.pbot-history__acts .icon-btn').first().click();
+await p.locator('.pbot-turn__acts button').first().click(); await settle(p, 400); await grab(p);
+await p.keyboard.press('Escape'); await settle(p, 300);
+await p.locator('.pbot-conv [aria-label="Record a voice message"]').first().click(); await settle(p, 1500); await grab(p);
+await p.locator('[aria-label="Stop recording"]').first().click(); await settle(p, 800); await grab(p);
+await p.locator('[aria-label="Send voice note"]').first().click(); await settle(p, 1500); await grab(p);
+await settle(p, 4000);
+await p.locator('.pbot-conv .pbot-filepicker').setInputFiles(path.join(UIUX, 'themes/app/assets/images/askpbot/empty-state.png'));
+await settle(p, 300); await grab(p);
+await settle(p, 4000); await p.locator('.pbot-conv textarea').first().press('Enter'); await settle(p, 1000); await grab(p);
+await p.locator('.pbot-imgmsg__open').first().click().catch(() => {}); await settle(p, 400); await grab(p);
+
+const q = await ctx.newPage();
+await q.goto(`${BASE}/app/home`, { waitUntil: 'networkidle' });
+await q.evaluate(() => window.dispatchEvent(new CustomEvent('pbot-open'))); await settle(q, 1500); await grab(q);
+await q.locator('.pbot-panel .btn--primary').first().click(); await settle(q, 500); await grab(q);
+await q.locator('.pbot-panel .pbot-suggest__chip').first().click(); await settle(q, 4500); await grab(q);
+
+const out = path.join(here, 'classes.json');
+fs.writeFileSync(out, JSON.stringify({ classes: [...found].sort() }, null, 1) + '\n');
+console.log(`${found.size} classes → ${path.relative(process.cwd(), out)}`);
+await browser.close();
+```
 
 ---
 
@@ -5430,8 +8901,8 @@ Ordered by what unblocks the most.
 | 6 | **Shared-store rate limiting** | Makes the throttle real rather than nominal | Half a day |
 | 7 | **Scheduled reliability probes** | Catches breakage before a user does | Half a day |
 | 8 | **Error alerting on `outcome:"error"`** | Turns logs into signal | Hours |
-| 9 | Real mascot assets (`pbot-awe.svg`, `pbot.riv`) | Currently emoji placeholders | Hours |
-| 10 | Markdown rendering with a sanitiser | Quality-of-life; do it safely or not at all | Days |
+| ~~9~~ | ~~Real mascot assets~~ | **Done 2026-10-02** — the source's art and Rive PBot, via `npm run design:sync` | — |
+| ~~10~~ | ~~Markdown rendering with a sanitiser~~ | **Done 2026-10-02** — as elements, not sanitised HTML | — |
 | 11 | Server-side history | Cross-device sync. Needs #3 first | Days |
 
 **Items 1–4 are the difference between a demo and something you can leave
@@ -5463,10 +8934,18 @@ required.
 | `components/pbot/PBotComposer.tsx` | 188 | Input, attach, send/stop |
 | `components/pbot/PBotChat.tsx` | 134 | Transcript + telemetry |
 | `components/pbot/PBotPanel.tsx` | 127 | Portal, scrim, focus |
-| `components/pbot/icons.tsx` | 124 | Inlined icons |
 | `components/pbot/PBotTurn.tsx` | 99 | One turn + actions |
-| `components/pbot/PBotHome.tsx` | 80 | New chat + history |
-| `components/pbot/PBotMascot.tsx` | 29 | Fixed launcher |
+| `components/pbot/PBotMascot.tsx` | 43 | Floating PBot launcher |
+| `components/pbot/useVoice.ts` | 316 | Voice: record, transcribe, play |
+| `components/pbot/ds.tsx` | 131 | DS Icon / Btn / IconBtn |
+| `components/pbot/behaviors.ts` | 156 | Bounce, scroll fades, typewriter |
+| `components/pbot/PBotRive.tsx` | 64 | Animated PBot |
+| `components/pbot/PBotTitle.tsx` | 58 | Renamable chat name |
+| `components/pbot/PBotMarkdown.tsx` | 47 | Reply markdown as elements |
+| `app/pbot-host.css` | 156 | Host fit + this app's extra parts |
+| `app/pbot.css` | 2572 | GENERATED design system rules |
+| `scripts/pbot-design/sync.mjs` | 209 | Design extraction |
+| `scripts/pbot-design/collect-classes.mjs` | 80 | Source class inventory |
 | `components/pbot/PBotLauncher.tsx` | 18 | Button launcher |
 | `evals/run.ts` | 569 | Eval suite |
 

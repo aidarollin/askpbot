@@ -30,7 +30,7 @@ export default function EmbedDemo() {
 
       <div className="mt-8 flex flex-wrap items-center gap-3">
         <PBotLauncher />
-        <span className="text-muted text-sm">or press the panda, bottom-right</span>
+        <span className="text-muted text-sm">or tap PBot, bottom-right</span>
       </div>
 
       <div className="border-border bg-surface mt-12 rounded-2xl border p-5">

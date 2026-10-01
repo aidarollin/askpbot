@@ -38,6 +38,61 @@ Entry shape: **Done / Decided / Blocked / Next**.
 
 ---
 
+## 2026-10-02 — The design re-synced from the source; markdown, rename and voice in
+
+**Done**
+
+- Brought the current AskPBot design over from `pandai.question.uiux`
+  (`fe/aida`, `42a250e` — every branch agreed on the AskPBot files). The source
+  had moved far past the August port: real art, an animated Rive PBot, a new
+  web layout with one top bar, a deep-space chat scene, an in-row history menu.
+- Did it by **extraction, not re-typing**. A collector drives the running source
+  app through every shipped state and records the classes it renders; a sync
+  keeps only source rules whose selectors use those classes and writes
+  `app/pbot.css`, the art, a cut-down icon sprite and `pbot.riv`. Components
+  emit the source markup class for class. `npm run design:sync` re-runs it.
+- Re-scoped in, at the user's choice: markdown replies, history rename with the
+  in-row menu, and voice notes. Logged in SCOPE.md.
+- Rendered markdown with `react-markdown` instead of porting the source's
+  `md()`, which escapes `& < >` but not `"` — a link in model output can break
+  out of its `href`. Elements only; raw HTML dropped; unsafe schemes stripped.
+- Voice: recorded for playback and transcribed by the Web Speech API in
+  parallel; the transcript is the turn. Request shape unchanged.
+- History became an external store (`useSyncExternalStore`) after React 19's
+  lint rejected refreshing it from the save effect. Side effect: the rail now
+  updates while you chat, and other tabs follow.
+- Fixed a latent bug: re-saving a reopened conversation dropped its "an image
+  was sent" marker. Covered by the new `history-persistence` offline eval.
+- Verified: `npm run check` (8/8), `npm run build`, PBot assets and the Rive
+  canvas on `workerd`, and seven scripted browser flows with the model stubbed —
+  details in RELIABILITY.md.
+
+**Decided**
+
+- Rive's WASM is self-hosted, not fetched from unpkg as the package defaults
+  to; `@rive-app/canvas` is pinned exact because the WASM is copied from it.
+- The panel fires `pbot-closed` on `window`, the mirror of `pbot-open`, so the
+  floating PBot can come back from his poof.
+- Hero copy in English, not the source's Malay — the persona is tuned in English.
+- Not ported: Math Drill, `ds-scroll`, gaze-follow, the report modals.
+
+**Found**
+
+- My own extractor briefly dropped `.pbot-web__side-body`: a `\bbody\b` filter
+  for host-page selectors also matched the class name. Caught by comparing
+  screenshots, fixed, recorded in the script.
+
+**Blocked**
+
+- No `.env.local` in this checkout, so no turn in the new UI has hit a real
+  model. The server path is unchanged, but that is an inference, not a test.
+
+**Next**
+
+1. Click through both surfaces by hand with a real key — including a real voice
+   note in Chrome, which the scripted run could only stub.
+2. The deploy (unchanged from the entry below).
+
 ## 2026-09-02 (later) — Deploy configuration proven; the deploy itself still not run
 
 **Done**

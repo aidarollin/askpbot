@@ -16,7 +16,9 @@ Versions are the ones actually installed and building, not intentions.
 | Framework | Next.js, App Router | 16.3.1 |
 | UI | React | 19.2.8 |
 | Language | TypeScript, `strict` | 5.x |
-| Styling | Tailwind CSS v4 plus a ported `.pbot-*` CSS layer | 4.x |
+| Styling | Tailwind CSS v4, plus `app/pbot.css` — the Pandai DS rules, **generated** from `pandai.question.uiux` by `npm run design:sync` | 4.x |
+| Markdown | `react-markdown` + `remark-gfm` — elements, never an HTML string | 10.1.0 / 4.0.1 |
+| Mascot animation | `@rive-app/canvas`, **pinned exact**, WASM self-hosted | 2.38.5 |
 | Model access | `@anthropic-ai/sdk` | 0.117.1 |
 | Model | `claude-sonnet-5`, adaptive thinking, `effort: medium` | — |
 | Eval runner | `tsx` | 4.x |
@@ -60,7 +62,8 @@ the tool loop), NDJSON events back, and one structured log line per turn.
 | `lib/limits.ts` | Limits the browser also needs, behind `NEXT_PUBLIC_`. |
 | `lib/log.ts` | Structured turn and feedback logging. |
 | `lib/types.ts` | Wire types and the stream event union — the client/server contract. |
-| `components/pbot/*` | Both surfaces. `PBotWeb` is the two-column app at `/`; `PBotPanel` is the docked overlay at `/embed`. They share `usePBot`, `PBotChat`, `PBotTurn`, `PBotComposer`, `PBotHistory`, `PBotSuggestions` and one stylesheet — the shells differ, nothing below them does. |
+| `components/pbot/*` | Both surfaces. `PBotWeb` is the two-column app at `/`; `PBotPanel` is the docked overlay at `/embed`. They share `usePBot`, `PBotChat`, `PBotTurn`, `PBotComposer`, `PBotHistory`, `PBotSuggestions`, `useVoice` and one stylesheet — the shells differ, nothing below them does. `ds.tsx` emits the source DS's button and icon markup so its CSS applies unchanged. |
+| `scripts/pbot-design/*` | The design pipeline: which classes the source renders (`collect-classes.mjs` → `classes.json`), and the extraction of its rules, art, icons and Rive file (`sync.mjs`). Its outputs — `app/pbot.css`, `public/pbot/` — are never hand-edited. |
 | `evals/run.ts` | The eval suite. |
 
 ## Decisions and their reasons
@@ -129,9 +132,30 @@ wrong history attached. `startChatWith` builds the turn itself.
 ### Stateless server, client-side history
 
 No session store, no sticky routing, any instance serves any turn. History lives
-in `localStorage`. Tradeoffs accepted: per-browser, no sync, and attachments
-stripped before saving, because base64 images against a 5MB quota would evict
-the history after two screenshots.
+in `localStorage`, read through `useSyncExternalStore` so every write reaches
+every surface (and other tabs, via the `storage` event). Tradeoffs accepted:
+per-browser, no sync, and attachments stripped before saving, because base64
+images against a 5MB quota would evict the history after two screenshots. A
+voice note keeps its waveform and transcript but not its clip, a `blob:` URL
+that dies with the tab anyway.
+
+### Voice is transcribed in the browser
+
+No audio input exists on this API path, so a voice note is recorded for the
+bubble and, in parallel, transcribed by the Web Speech API; the transcript is
+the turn and takes the typed-text path through every guardrail. Nothing new
+reaches the server — the request shape is unchanged. Costs: no Firefox, and
+Chrome's recogniser sends the audio to Google.
+
+### The design is extracted, not re-implemented
+
+`sync.mjs` keeps a source rule only when every class in its selector is one the
+source renders in a state this app ships, so dropped features (Math Drill,
+ds-scroll, the report modals) fall out without hand-pruning, and the components
+reproduce the source markup class for class. A port that re-typed the CSS was
+tried first (2026-08) and could only drift. The cost is a build-time dependency
+on a sibling checkout of `pandai.question.uiux` — only to *re-sync*; the outputs
+are committed, so building and deploying need nothing from it.
 
 ### Panel keeps brand colours in dark mode
 
@@ -315,18 +339,19 @@ are mutually exclusive; sending both is a validation error.
 
 ### Guardrails — the part that is not optional
 
-Fetched pages are untrusted third-party text entering the model's context. This
-repo already refuses to render markdown on injection grounds; retrieval is the
-same argument against a larger surface, so the mitigations ship **with** the
-feature:
+Fetched pages are untrusted third-party text entering the model's context.
+Replies render as markdown (since 2026-10-02), but as React elements with raw
+HTML dropped and unsafe link schemes stripped — not as HTML. Retrieval is the
+same injection argument against a larger surface, so the mitigations ship
+**with** the feature:
 
 - Domain policy defaults to a blocklist, configurable per deployment.
 - The existing output leak check runs unchanged — `PROMPT_LEAK_SENTINEL` is
   what catches a page that talked the model into reciting its instructions.
 - Turn logs record host names and result counts. Not page content, consistent
   with the existing rule that no message content is logged.
-- Output rendering stays plain text. Retrieval does **not** re-open the
-  markdown question.
+- Markdown stays element-only. Retrieval must not add `rehype-raw` or any other
+  route from model text to live HTML.
 
 ### Evals
 
@@ -358,6 +383,6 @@ Carried deliberately, with the reason and the trigger to fix.
 | --- | --- | --- |
 | In-memory rate limiter, per-instance | Stops one tab hammering the API, which is the demo's actual threat | Any real traffic, or a move to Cloudflare where KV makes it cheap |
 | LLM judge is the same model family it grades | Directional smoke test for tone, not an oracle | If persona regressions start slipping through |
-| Plain-text rendering, no markdown | Largest injection surface in the app; text is safe and correct | Only alongside a sanitiser and a hardened renderer |
-| Emoji placeholders for mascot and avatar | Real assets were not available | When `pbot-awe.svg` and `pbot.riv` are provided |
+| The design is a snapshot of the source | `app/pbot.css` names its source commit; re-syncing is one command | Whenever the AskPBot design changes upstream |
+| `@rive-app/canvas` pinned exact | Its WASM is copied into `public/` and must match the JS | Upgrade both together: bump the version, `npm install`, `npm run design:sync` |
 | Leak check runs post-turn, not mid-stream | Intercepting mid-stream means buffering, which defeats streaming | Not planned; the tradeoff is the right one |

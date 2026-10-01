@@ -1,16 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
+  conversationsServerSnapshot,
+  conversationsSnapshot,
   deleteConversation,
   deriveTitle,
   groupByDate,
-  loadConversations,
+  renameConversation,
   saveConversation,
-  type HistoryGroup,
+  subscribeConversations,
   type StoredConversation,
 } from "@/lib/history";
-import type { Attachment, ChatMessage, StreamEvent, TurnUsage } from "@/lib/types";
+import type { Attachment, ChatMessage, StreamEvent, TurnUsage, VoiceNote } from "@/lib/types";
 
 /**
  * The AskPBot state machine.
@@ -44,8 +46,9 @@ export interface TurnStats {
   truncated: boolean;
 }
 
+// Markdown since replies render it: the source's own greeting bolds the name.
 const GREETING =
-  "Hi! I'm PBot, your AI study buddy — you can ask me anything below. 🐼";
+  "Hi! I'm **PBot**, your AI study buddy — you can ask me anything below. 🐼";
 
 function newId(): string {
   return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
@@ -53,6 +56,10 @@ function newId(): string {
 
 function greetingMessage(): ChatMessage {
   return { id: newId(), role: "assistant", content: GREETING };
+}
+
+function userTurn(content: string, image?: Attachment, voice?: VoiceNote): ChatMessage {
+  return { id: newId(), role: "user", content, ...(image ? { image } : {}), ...(voice ? { voice } : {}) };
 }
 
 /**
@@ -72,13 +79,16 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
   const [status, setStatus] = useState<PBotStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [lastTurn, setLastTurn] = useState<TurnStats | null>(null);
-  // The panel loads history when it opens, so [] is correct until then. The
-  // page surface shows it on first paint, so it is seeded here rather than from
-  // an effect — `loadConversations` returns [] off the browser, so this is safe
-  // during SSR, and `PBotWeb` gates the render on hydration so the two agree.
-  const [history, setHistory] = useState<HistoryGroup[]>(() =>
-    mode === "page" ? groupByDate(loadConversations()) : [],
+  // Saved chats are localStorage, an external store: every save, rename and
+  // delete notifies, so the web rail and the panel's home are always current
+  // without anyone remembering to refresh them. Empty on the server and during
+  // hydration; `PBotWeb` gates the rail on hydration so the two agree.
+  const conversations = useSyncExternalStore(
+    subscribeConversations,
+    conversationsSnapshot,
+    conversationsServerSnapshot,
   );
+  const history = useMemo(() => groupByDate(conversations), [conversations]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [ratedIds, setRatedIds] = useState<Set<string>>(new Set());
 
@@ -86,16 +96,9 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
   const createdAtRef = useRef<number>(Date.now());
   const isStreaming = status !== "idle";
 
-  const refreshHistory = useCallback(() => {
-    setHistory(groupByDate(loadConversations()));
-  }, []);
-
   // --- panel open/close ----------------------------------------------------
 
-  const show = useCallback(() => {
-    setIsOpen(true);
-    refreshHistory();
-  }, [refreshHistory]);
+  const show = useCallback(() => setIsOpen(true), []);
 
   const hide = useCallback(() => setIsOpen(false), []);
 
@@ -156,13 +159,11 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
     abortRef.current?.abort();
     setStatus("idle");
     setView("home");
-    refreshHistory();
-  }, [refreshHistory]);
+  }, []);
 
   const removeConversation = useCallback(
     (id: string) => {
       deleteConversation(id);
-      refreshHistory();
       // If the open conversation was the one deleted, don't leave it stranded.
       if (id === conversationId) {
         setView("home");
@@ -170,7 +171,7 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
         setMessages([]);
       }
     },
-    [conversationId, refreshHistory],
+    [conversationId],
   );
 
   // Persist after every settled turn. Skipped while streaming so a partial
@@ -187,6 +188,27 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
       messages,
     });
   }, [conversationId, isStreaming, messages, title]);
+
+  /**
+   * Renames a conversation from the history row or the chat's own title.
+   * Returns false when refused (blank, or unchanged) so an inline editor knows
+   * to put the old name back.
+   */
+  const rename = useCallback(
+    (id: string, next: string) => {
+      const name = next.replace(/\s+/g, " ").trim();
+      if (!name) return false;
+      const isCurrent = id === conversationId;
+      if (isCurrent && name === title) return false;
+      // A chat with no question yet is not saved, so there is no row to rename —
+      // the save effect writes this title when the first turn settles.
+      const saved = renameConversation(id, name);
+      if (!saved && !isCurrent) return false;
+      if (isCurrent) setTitle(name);
+      return true;
+    },
+    [conversationId, title],
+  );
 
   // --- the turn ------------------------------------------------------------
 
@@ -296,18 +318,16 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
   }, []);
 
   const send = useCallback(
-    (text: string, image?: Attachment) => {
+    (text: string, image?: Attachment, voice?: VoiceNote) => {
       const trimmed = text.trim();
       if ((!trimmed && !image) || isStreaming) return;
-      const userMessage: ChatMessage = {
-        id: newId(),
-        role: "user",
-        content: trimmed,
-        ...(image ? { image } : {}),
-      };
-      void runTurn([...messages, userMessage]);
+      const outbound = [...messages, userTurn(trimmed, image, voice)];
+      // The first question names the chat — the same rule the save uses, applied
+      // here so the open chat's title shows it immediately, not after a reload.
+      if (title === "New Chat") setTitle(deriveTitle(outbound));
+      void runTurn(outbound);
     },
-    [isStreaming, messages, runTurn],
+    [isStreaming, messages, runTurn, title],
   );
 
   /**
@@ -320,17 +340,18 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
    * turn here sidesteps the stale closure entirely.
    */
   const startChatWith = useCallback(
-    (text: string) => {
+    (text: string, image?: Attachment, voice?: VoiceNote) => {
       const trimmed = text.trim();
-      if (!trimmed || isStreaming) return;
+      if ((!trimmed && !image) || isStreaming) return;
       abortRef.current?.abort();
       createdAtRef.current = Date.now();
       setConversationId(newId());
-      setTitle("New Chat");
       setError(null);
       setLastTurn(null);
       setView("chat");
-      void runTurn([greetingMessage(), { id: newId(), role: "user", content: trimmed }]);
+      const outbound = [greetingMessage(), userTurn(trimmed, image, voice)];
+      setTitle(deriveTitle(outbound));
+      void runTurn(outbound);
     },
     [isStreaming, runTurn],
   );
@@ -398,6 +419,7 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
     openChat,
     history,
     removeConversation,
+    rename,
     // conversation
     messages,
     status,

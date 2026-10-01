@@ -23,18 +23,19 @@ differs. No model case has ever run against Anthropic direct.
 
 | Layer | Coverage | Last run | Result |
 | --- | --- | --- | --- |
-| Type safety | Whole repo, `strict` | 2026-09-02 | Pass, 0 errors |
-| Lint | Whole repo | 2026-09-02 | Pass, 0 warnings |
-| Production build | Whole app | 2026-09-02 | Pass, 5 routes |
-| Offline evals | Guardrails, attachments, history | 2026-09-02 | **7/7 pass** |
+| Type safety | Whole repo, `strict` | 2026-10-02 | Pass, 0 errors |
+| Lint | Whole repo | 2026-10-02 | Pass, 0 warnings |
+| Production build | Whole app | 2026-10-02 | Pass, 5 routes |
+| Offline evals | Guardrails, attachments, history | 2026-10-02 | **8/8 pass** |
 | Rendered-markup checks | `/` and `/embed`, production server | 2026-08-23 | Pass, both 200 |
 | Dev-server route check | `/` and `/embed` on `next dev` | 2026-08-26 | Pass, both 200 |
 | API path smoke tests | Chat + feedback routes, running server | 2026-08-23 | Pass, 10 paths |
 | Post-stream error path | Auth failure after first byte | 2026-08-26 | Pass, in-band error event |
-| UI interaction, either surface | Clicking through it | **Never run** | **Unknown** |
+| UI interaction, either surface | Scripted browser run on `next dev`, **model stubbed** | 2026-10-02 | Pass, 7 flows — see below. Not yet by a person, and not against a real model |
 | Live model turn, streamed | Chat + tool round-trip over HTTP | 2026-09-02 | Pass, via OpenRouter |
 | Model evals | Persona, safety, tools, memory | 2026-09-02 | **18/19** — one real failure |
-| Cloudflare worker build | `opennextjs-cloudflare build` | 2026-08-23 | Pass |
+| Cloudflare worker build | `opennextjs-cloudflare build` | 2026-10-02 | Pass |
+| PBot assets on `workerd` | `/pbot/**`, `rive.wasm` MIME, Rive paints, no off-origin fetch | 2026-10-02 | Pass |
 | Workers-runtime behaviour | `wrangler dev` on `workerd` | 2026-08-23 | Pass, 8 paths |
 | Deploy **configuration** | Worker vars + secret on `workerd`, no `.env.local` | 2026-09-02 | Pass, real streamed turn |
 | Deployed probes | Live URL | **Never run** | **Unknown** |
@@ -55,7 +56,7 @@ pre-commit gate and needs no API key or network.
 
 ## Layer 2 — Offline evals
 
-Seven deterministic cases over pure functions. No API key, no cost, no network,
+Eight deterministic cases over pure functions. No API key, no cost, no network,
 so they are the regression net that always runs.
 
 ```bash
@@ -70,6 +71,7 @@ npm run eval:offline
 | `guard-prescreen-false-positives` | Five legitimate adjacent questions are **not** caught |
 | `guard-attachments` | Media type, empty data, and oversize are rejected; a valid PNG and a caption-less image turn are accepted |
 | `history-grouping` | Today / Yesterday / month labels; title derivation and truncation |
+| `history-persistence` | A saved voice note keeps waveform and length but not its `blob:` URL; image bytes are dropped but the "an image was sent" marker survives a second save; a blank rename is refused. Mutation-checked: reverting the marker fix turns it red |
 | `guard-output-leak` | Verbatim system-prompt leakage is detected; ordinary text is not |
 
 **`guard-prescreen-false-positives` is the most important case in the suite.**
@@ -367,11 +369,21 @@ Stated so nobody assumes otherwise:
 
 - **No unit tests** beyond what the offline eval suite covers. The eval suite is
   the test suite; there is no separate `*.test.ts` layer.
-- **No browser or end-to-end tests.** The panel's interaction flow (open, send,
-  stop, regenerate, reopen from history) was exercised by hand on 2026-08-17,
-  not by an automated harness. **The web layout at `/` has not been exercised by
-  hand at all** — it has been verified only as server-rendered markup. Its
-  sidebar, hero chips, and active-conversation highlight are unclicked.
+- **No committed browser or end-to-end tests.** On 2026-10-02 a one-off
+  Playwright script drove `next dev` with `/api/chat` stubbed to canned NDJSON
+  and a stubbed speech recogniser (headless Chromium cannot reach Google's), and
+  passed seven flows: a voice note from the hero (the transcript is the turn,
+  and voice metadata is **not** sent to the server); an image attached, sent,
+  opened in the viewer and closed with Escape; renaming from the top bar, with
+  a blank name refused; history surviving a reload, with the voice clip and
+  image bytes gone as designed; deleting the open chat from the row menu; a 429
+  before the stream surfacing in the chat; and a reply carrying `<img onerror>`,
+  `<script>` and a `javascript:` link rendering with no live element and no
+  unsafe `href`. It also screenshotted both surfaces against the source app for
+  a visual comparison. The script lives outside the repo (it borrows Playwright
+  from the source checkout), so this is a dated observation, **not a regression
+  net**. Nobody has clicked the new UI by hand, and no turn in it has hit a
+  real model.
 - **No accessibility audit.** Roles, labels, focus management, and reduced-motion
   handling were written in deliberately, but nothing has been run against a
   screen reader or an automated checker.

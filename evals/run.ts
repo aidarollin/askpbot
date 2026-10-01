@@ -10,7 +10,14 @@ import {
   validateAttachment,
   validateShape,
 } from "../lib/guardrails";
-import { deriveTitle, groupByDate, type StoredConversation } from "../lib/history";
+import {
+  deriveTitle,
+  groupByDate,
+  loadConversations,
+  renameConversation,
+  saveConversation,
+  type StoredConversation,
+} from "../lib/history";
 import { MAX_IMAGE_BASE64_CHARS } from "../lib/limits";
 import { PROMPT_LEAK_SENTINEL } from "../lib/prompt";
 import type { ImageMediaType } from "../lib/types";
@@ -250,6 +257,55 @@ const OFFLINE_CASES: OfflineCase[] = [
             deriveTitle([{ id: "1", role: "assistant", content: "hi" }]) === "New Chat",
         },
       ];
+    },
+  },
+  {
+    id: "history-persistence",
+    description:
+      "Saved history drops what localStorage cannot hold (image bytes, a voice clip's blob URL) but keeps that they were sent, and refuses a blank rename",
+    run: () => {
+      // lib/history.ts only touches window.localStorage; an in-memory one is
+      // enough to exercise the real save path without a browser.
+      const store = new Map<string, string>();
+      const g = globalThis as unknown as { window?: unknown };
+      g.window = {
+        localStorage: {
+          getItem: (k: string) => store.get(k) ?? null,
+          setItem: (k: string, v: string) => void store.set(k, v),
+        },
+      };
+      try {
+        const base: StoredConversation = {
+          id: "c1",
+          title: "Voice and image",
+          createdAt: 1,
+          updatedAt: 2,
+          messages: [
+            { id: "1", role: "user", content: "what is a prime", voice: { seconds: 3, bars: [4, 9, 4], url: "blob:x" } },
+            { id: "2", role: "user", content: "and this?", image: { mediaType: "image/png", data: "AAAA" } },
+          ],
+        };
+        saveConversation(base);
+        const first = loadConversations()[0];
+        // Re-save what came back, as reopening a chat and sending again does.
+        saveConversation({ ...first, updatedAt: 3 });
+        const again = loadConversations()[0];
+        const [voiceTurn, imageTurn] = again.messages;
+        return [
+          { name: "voice keeps its waveform and length", pass: voiceTurn.voice?.seconds === 3 && voiceTurn.voice.bars.length === 3 },
+          { name: "voice drops its blob: URL", pass: voiceTurn.voice?.url === undefined },
+          { name: "image drops its bytes", pass: imageTurn.image === undefined },
+          { name: "image marker survives a re-save", pass: imageTurn.imagePlaceholder === true },
+          { name: "blank rename refused", pass: renameConversation("c1", "   ") === false },
+          {
+            name: "rename collapses whitespace",
+            pass: renameConversation("c1", "  Primes   and pictures ") && loadConversations()[0].title === "Primes and pictures",
+          },
+          { name: "unknown id refused", pass: renameConversation("nope", "x") === false },
+        ];
+      } finally {
+        delete g.window;
+      }
     },
   },
   {

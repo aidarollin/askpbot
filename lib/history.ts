@@ -38,10 +38,64 @@ function isBrowser(): boolean {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
+/*
+ * The list is an external store, read with `useSyncExternalStore` (see
+ * `useConversations` in usePBot). Writes below notify this tab's subscribers;
+ * the `storage` event covers other tabs, so `/` and `/embed` open side by side
+ * stay in step. The snapshot is cached against the raw string, because the
+ * store contract requires the same array back until something actually changed.
+ */
+const listeners = new Set<() => void>();
+const EMPTY: StoredConversation[] = [];
+let cachedRaw: string | null = null;
+let cached: StoredConversation[] = EMPTY;
+
+function notify() {
+  listeners.forEach((l) => l());
+}
+
+export function subscribeConversations(listener: () => void): () => void {
+  listeners.add(listener);
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === STORAGE_KEY || e.key === null) listener();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    listeners.delete(listener);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+export function conversationsSnapshot(): StoredConversation[] {
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return EMPTY;
+  }
+  if (raw !== cachedRaw) {
+    cachedRaw = raw;
+    cached = parseConversations(raw);
+  }
+  return cached;
+}
+
+/** The server has no history; neither does the hydration pass. */
+export function conversationsServerSnapshot(): StoredConversation[] {
+  return EMPTY;
+}
+
 export function loadConversations(): StoredConversation[] {
   if (!isBrowser()) return [];
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    return parseConversations(window.localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return [];
+  }
+}
+
+function parseConversations(raw: string | null): StoredConversation[] {
+  try {
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -60,12 +114,14 @@ export function saveConversation(conversation: StoredConversation): void {
   try {
     const stripped: StoredConversation = {
       ...conversation,
-      messages: conversation.messages.map(({ id, role, content, image }) => ({
+      messages: conversation.messages.map(({ id, role, content, image, imagePlaceholder, voice }) => ({
         id,
         role,
         content,
         // Keep the fact that an image was sent; drop the payload.
-        ...(image ? { imagePlaceholder: true } : {}),
+        ...(image || imagePlaceholder ? { imagePlaceholder: true } : {}),
+        // Keep a voice note's shape and length; its blob: URL dies with the tab.
+        ...(voice ? { voice: { seconds: voice.seconds, bars: voice.bars } } : {}),
       })) as ChatMessage[],
     };
 
@@ -75,9 +131,27 @@ export function saveConversation(conversation: StoredConversation): void {
       .slice(0, MAX_CONVERSATIONS);
 
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    notify();
   } catch {
     // Quota exceeded or storage disabled (private mode, blocked cookies).
     // History is a convenience; losing it must never break the chat.
+  }
+}
+
+/** Renames one saved conversation in place. A blank name is refused. */
+export function renameConversation(id: string, title: string): boolean {
+  const name = title.replace(/\s+/g, " ").trim();
+  if (!isBrowser() || !name) return false;
+  try {
+    const all = loadConversations();
+    const hit = all.find((c) => c.id === id);
+    if (!hit) return false;
+    hit.title = name;
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+    notify();
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -86,6 +160,7 @@ export function deleteConversation(id: string): void {
   try {
     const next = loadConversations().filter((c) => c.id !== id);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    notify();
   } catch {
     /* ignore */
   }

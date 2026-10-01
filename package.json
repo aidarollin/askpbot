@@ -16,6 +16,7 @@
     "eval:offline": "tsx evals/run.ts --offline",
     "check": "npm run typecheck && npm run lint && npm run eval:offline",
     "export:refresh": "node scripts/inline-export.mjs",
+    "design:sync": "node scripts/pbot-design/sync.mjs",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",
@@ -23,9 +24,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
+    "@rive-app/canvas": "2.38.5",
     "next": "16.3.1",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@opennextjs/cloudflare": "^1.20.2",

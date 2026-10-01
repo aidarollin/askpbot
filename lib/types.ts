@@ -20,6 +20,19 @@ export interface Attachment {
   name?: string;
 }
 
+/**
+ * A spoken user turn, as the bubble draws it. The words themselves travel as
+ * the message's `content` — that transcript is all the model ever sees; this
+ * is only the waveform, the length, and (in memory) a clip to play back.
+ */
+export interface VoiceNote {
+  seconds: number;
+  /** Bar heights in px, already resampled to what the bubble draws. */
+  bars: number[];
+  /** A blob: URL. In-memory only — dropped before persisting, like images. */
+  url?: string;
+}
+
 /** A single conversation turn as the client stores and sends it. */
 export interface ChatMessage {
   id: string;
@@ -29,6 +42,8 @@ export interface ChatMessage {
   image?: Attachment;
   /** Set on rehydrated history where an image was dropped to save quota. */
   imagePlaceholder?: boolean;
+  /** Present when the user spoke this turn instead of typing it. Client-only. */
+  voice?: VoiceNote;
 }
 
 /** What the client POSTs to /api/chat. */
