@@ -25,13 +25,13 @@ differs. No model case has ever run against Anthropic direct.
 | --- | --- | --- | --- |
 | Type safety | Whole repo, `strict` | 2026-10-02 | Pass, 0 errors |
 | Lint | Whole repo | 2026-10-02 | Pass, 0 warnings |
-| Production build | Whole app | 2026-10-02 | Pass, 5 routes |
+| Production build | Whole app | 2026-10-02 | Pass, 5 routes. The second change that day was built with `build:next` only — the Worker build was not re-run (a dev server held `workerd`) |
 | Offline evals | Guardrails, attachments, history | 2026-10-02 | **8/8 pass** |
 | Rendered-markup checks | `/` and `/embed`, production server | 2026-08-23 | Pass, both 200 |
 | Dev-server route check | `/` and `/embed` on `next dev` | 2026-08-26 | Pass, both 200 |
 | API path smoke tests | Chat + feedback routes, running server | 2026-08-23 | Pass, 10 paths |
 | Post-stream error path | Auth failure after first byte | 2026-08-26 | Pass, in-band error event |
-| UI interaction, either surface | Scripted browser run on `next dev`, **model stubbed** | 2026-10-02 | Pass, 7 flows — see below. Not yet by a person, and not against a real model |
+| UI interaction, either surface | Scripted browser run on `next dev`, **model stubbed** | 2026-10-02 | Pass, 7 flows, plus the phone layout at four widths — see below. Not yet by a person, and not against a real model |
 | Live model turn, streamed | Chat + tool round-trip over HTTP | 2026-09-02 | Pass, via OpenRouter |
 | Model evals | Persona, safety, tools, memory | 2026-09-02 | **18/19** — one real failure |
 | Cloudflare worker build | `opennextjs-cloudflare build` | 2026-10-02 | Pass |
@@ -384,6 +384,19 @@ Stated so nobody assumes otherwise:
   from the source checkout), so this is a dated observation, **not a regression
   net**. Nobody has clicked the new UI by hand, and no turn in it has hit a
   real model.
+
+  A second one-off run, same date, after `/` took the panel's UI on phones
+  (same stub, same caveats). At 390, 481, 600 and 763px wide it passed: `/`
+  renders the panel with no web layout, no close and no maximize, and no
+  horizontal scroll; New Chat → a suggestion → a streamed reply → Back shows the
+  chat in history; reopening it, widening to 1280px (the web layout, same three
+  turns) and narrowing again (the panel, still in that chat). With JavaScript
+  off, a phone gets the panel's blank ground and a desktop the web layout. A
+  geometry diff of every `pbot-*` / `btn*` element at 390px, home and chat,
+  against the source's panel on `/app/home` found **no differences** on
+  `/embed`, and on `/` only the dropped close/maximize and the Math Drill card.
+  That diff is what found that `sync.mjs` had been dropping the source's mobile
+  type tier (titles at 18px instead of 16px).
 - **No accessibility audit.** Roles, labels, focus management, and reduced-motion
   handling were written in deliberately, but nothing has been run against a
   screen reader or an automated checker.

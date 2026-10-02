@@ -81,6 +81,9 @@ const usedVars = new Set();
 const usedKeyframes = new Set();
 const keyframes = new Map();
 const rootDecls = new Map();
+// `:root` blocks inside @media — the source's responsive type tiers (headings and titles
+// drop one tier below 764px). Kept for the tokens this port uses, in source order.
+const tieredRoots = [];
 
 function scan(decl) {
   for (const m of decl.value.matchAll(/var\(\s*(--[\w-]+)/g)) usedVars.add(m[1]);
@@ -89,11 +92,17 @@ function scan(decl) {
   }
 }
 
-function filter(src, dst, file) {
+function filter(src, dst, file, media = []) {
   src.each((node) => {
     if (node.type === 'rule') {
       if (node.selector.includes(':root')) {
-        if (node.selector.trim() === ':root' && (file === 'tokens' || file === 'base')) {
+        if (node.selector.trim() === ':root' && media.length) {
+          const decls = [];
+          node.walkDecls((d) => {
+            if (d.prop.startsWith('--')) decls.push([d.prop, d.value]);
+          });
+          tieredRoots.push({ media, decls });
+        } else if (node.selector.trim() === ':root' && (file === 'tokens' || file === 'base')) {
           // Braces matter: a walk callback that returns `false` stops the walk.
           node.walkDecls((d) => {
             if (d.prop.startsWith('--')) rootDecls.set(d.prop, d.value);
@@ -112,7 +121,7 @@ function filter(src, dst, file) {
       if (node.name.endsWith('keyframes')) keyframes.set(node.params.trim(), node);
       else if (['media', 'supports', 'container'].includes(node.name) && !/prefers-color-scheme/.test(node.params)) {
         const at = node.clone({ nodes: [] });
-        filter(node, at, file);
+        filter(node, at, file, [...media, `@${node.name} ${node.params}`]);
         if (at.nodes.length) { at.raws.before = '\n\n'; dst.append(at); }
       }
     }
@@ -150,6 +159,16 @@ for (let grew = true; grew; ) {
   }
 }
 
+// A tier only restates base tokens, so it keeps exactly the ones the base block kept. The
+// token walk above stays the only thing that decides what is "used".
+const tiers = tieredRoots
+  .map(({ media, decls }) => ({ media, decls: decls.filter(([k]) => tokens.has(k)) }))
+  .filter(({ decls }) => decls.length)
+  .map(({ media, decls }) => {
+    const body = [':root {', ...decls.map(([k, v]) => `    ${k}: ${v};`), '}'];
+    return [...media.map((m) => `${m} {`), ...body, ...media.map(() => '}')].join('\n');
+  });
+
 const commit = execSync('git rev-parse --short HEAD', { cwd: UIUX }).toString().trim();
 const cssAssets = new Set();
 let out = [
@@ -159,6 +178,7 @@ let out = [
   ':root {',
   ...[...tokens].sort().map(([k, v]) => `    ${k}: ${v};`),
   '}',
+  ...tiers.map((t) => `\n${t}`),
   ...body,
   '\n\n/* ── keyframes ── */\n',
   frames.join('\n\n'),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type Ref } from "react";
 import { createPortal } from "react-dom";
 import { useButtonBounce } from "./behaviors";
 import { Btn, Icon, IconLink } from "./ds";
@@ -62,81 +62,110 @@ export function PBotPanel({ side = "right" }: { side?: "left" | "right" }) {
         // panel's controls aren't reachable behind the page.
         {...(pbot.isOpen ? {} : { inert: true, "aria-hidden": true })}
       >
-        {/* The scene, back to front (6354:17280 …): wordmark under the two
-            spheres, then the glows. Decoration only. */}
-        <span className="pbot-panel__glow" aria-hidden="true" />
-        <span className="pbot-watermark" aria-hidden="true" />
-        <span className="pbot-orb pbot-orb--panel-lg" aria-hidden="true" />
-        <span className="pbot-orb pbot-orb--panel-sm" aria-hidden="true" />
-        <span className="pbot-glow pbot-glow--panel-a" aria-hidden="true" />
-        <span className="pbot-glow pbot-glow--panel-b" aria-hidden="true" />
-
-        <header className="pbot-panel__head">
-          {/* Maximize (DS 5977:7774) takes the conversation to the full page. */}
-          <IconLink href="/" icon="maximize-2" className="pbot-panel__max" label="Open Ask PBot full screen" />
-          <h2 className="pbot-panel__title">Ask Pbot</h2>
-          <button ref={closeRef} className="pbot-panel__close" type="button" onClick={pbot.hide} aria-label="Close">
-            <Icon name="x" size={20} />
-          </button>
-        </header>
-
-        {/* Hero (DS 3274:127527): the Ask PBot card, and PBot on his pod. */}
-        <div className="pbot-hero">
-          <div className="pbot-deck pbot-deck--solo">
-            <span className="pbot-deck__card pbot-deck__card--ask is-front">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/pbot/askpbot/tab-ask-active.png" alt="Ask PBot" />
-            </span>
-          </div>
-          <div className="pbot-podium" aria-hidden="true">
-            <span className="pbot-podium__pod">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/pbot/askpbot/mathdrill-pod.png" alt="" />
-            </span>
-            <span className="pbot-podium__mascot">
-              {/* Built only while open: no reason to run a canvas behind a closed panel. */}
-              {pbot.isOpen && <PBotRive size={200} className="pbot-podium__canvas" />}
-            </span>
-          </div>
-        </div>
-
-        <div className="pbot-feature">
-          {inChat ? (
-            <PBotChat
-              layout="panel"
-              title={pbot.title}
-              messages={pbot.messages}
-              status={pbot.status}
-              isStreaming={pbot.isStreaming}
-              error={pbot.error}
-              lastTurn={pbot.lastTurn}
-              copiedId={pbot.copiedId}
-              ratedIds={pbot.ratedIds}
-              onBack={pbot.back}
-              onRename={(next) => pbot.rename(pbot.conversationId!, next)}
-              onSend={pbot.send}
-              onStop={pbot.stop}
-              onRegenerate={pbot.regenerate}
-              onCopy={pbot.copy}
-              onRate={pbot.rate}
-            />
-          ) : (
-            // Home: New Chat, then the saved chats (or the empty state).
-            <div className="pbot-home">
-              <Btn variant="primary" size="l" block iconEnd="chevron-btn-m" onClick={pbot.newChat}>
-                Start a New Chat
-              </Btn>
-              <PBotHistory
-                history={pbot.history}
-                onOpenChat={pbot.openChat}
-                onRename={pbot.rename}
-                onDelete={pbot.removeConversation}
-              />
-            </div>
-          )}
-        </div>
+        <PBotPanelBody pbot={pbot} closeRef={closeRef} />
       </aside>
     </>,
     document.body,
+  );
+}
+
+/**
+ * Everything inside the panel's frame: the scene, the head, the hero, and home
+ * or chat. Shared by the docked panel and the web page's phone layout (see
+ * `PBotWeb`), which is the panel's UI with no host page to dock over.
+ *
+ * With no `closeRef` there is nothing to close to, so the head drops both the
+ * close and the maximize — the source's `.pbot-panel--page` does the same.
+ */
+export function PBotPanelBody({
+  pbot,
+  closeRef,
+}: {
+  pbot: ReturnType<typeof usePBot>;
+  closeRef?: Ref<HTMLButtonElement>;
+}) {
+  const inChat = pbot.view === "chat";
+  const docked = closeRef !== undefined;
+
+  return (
+    <>
+      {/* The scene, back to front (6354:17280 …): wordmark under the two
+          spheres, then the glows. Decoration only. */}
+      <span className="pbot-panel__glow" aria-hidden="true" />
+      <span className="pbot-watermark" aria-hidden="true" />
+      <span className="pbot-orb pbot-orb--panel-lg" aria-hidden="true" />
+      <span className="pbot-orb pbot-orb--panel-sm" aria-hidden="true" />
+      <span className="pbot-glow pbot-glow--panel-a" aria-hidden="true" />
+      <span className="pbot-glow pbot-glow--panel-b" aria-hidden="true" />
+
+      <header className="pbot-panel__head">
+        {/* Maximize (DS 5977:7774) takes the conversation to the full page. */}
+        {docked && (
+          <IconLink href="/" icon="maximize-2" className="pbot-panel__max" label="Open Ask PBot full screen" />
+        )}
+        <h2 className="pbot-panel__title">Ask Pbot</h2>
+        {docked && (
+          <button ref={closeRef} className="pbot-panel__close" type="button" onClick={pbot.hide} aria-label="Close">
+            <Icon name="x" size={20} />
+          </button>
+        )}
+      </header>
+
+      {/* Hero (DS 3274:127527): the Ask PBot card, and PBot on his pod. */}
+      <div className="pbot-hero">
+        <div className="pbot-deck pbot-deck--solo">
+          <span className="pbot-deck__card pbot-deck__card--ask is-front">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/pbot/askpbot/tab-ask-active.png" alt="Ask PBot" />
+          </span>
+        </div>
+        <div className="pbot-podium" aria-hidden="true">
+          <span className="pbot-podium__pod">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/pbot/askpbot/mathdrill-pod.png" alt="" />
+          </span>
+          <span className="pbot-podium__mascot">
+            {/* Built only while open: no reason to run a canvas behind a closed panel. */}
+            {pbot.isOpen && <PBotRive size={200} className="pbot-podium__canvas" />}
+          </span>
+        </div>
+      </div>
+
+      <div className="pbot-feature">
+        {inChat ? (
+          <PBotChat
+            layout="panel"
+            title={pbot.title}
+            messages={pbot.messages}
+            status={pbot.status}
+            isStreaming={pbot.isStreaming}
+            error={pbot.error}
+            lastTurn={pbot.lastTurn}
+            copiedId={pbot.copiedId}
+            ratedIds={pbot.ratedIds}
+            onBack={pbot.back}
+            onRename={(next) => pbot.rename(pbot.conversationId!, next)}
+            onSend={pbot.send}
+            onStop={pbot.stop}
+            onRegenerate={pbot.regenerate}
+            onCopy={pbot.copy}
+            onRate={pbot.rate}
+          />
+        ) : (
+          // Home: New Chat, then the saved chats (or the empty state).
+          <div className="pbot-home">
+            <Btn variant="primary" size="l" block iconEnd="chevron-btn-m" onClick={pbot.newChat}>
+              Start a New Chat
+            </Btn>
+            <PBotHistory
+              history={pbot.history}
+              onOpenChat={pbot.openChat}
+              onRename={pbot.rename}
+              onDelete={pbot.removeConversation}
+            />
+          </div>
+        )}
+      </div>
+    </>
   );
 }

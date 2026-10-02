@@ -2367,7 +2367,7 @@ export function usePBot({ mode = "panel" }: { mode?: PBotMode } = {}) {
 ```
 
 #### `components/pbot/PBotWeb.tsx`  
-_195 lines_
+_215 lines_
 
 ```tsx
 "use client";
@@ -2378,14 +2378,18 @@ import { Btn } from "./ds";
 import { PBotChat } from "./PBotChat";
 import { PBotComposer } from "./PBotComposer";
 import { PBotHistory } from "./PBotHistory";
+import { PBotPanelBody } from "./PBotPanel";
 import { PBotRive } from "./PBotRive";
 import { PBotHeroPrompts } from "./PBotSuggestions";
 import { PBotTitle } from "./PBotTitle";
 import { useIsHydrated } from "./useIsHydrated";
+import { useMediaQuery } from "./useMediaQuery";
 import { usePBot } from "./usePBot";
 
 const HERO_TITLE = "What shall we learn today?";
 const HERO_SUB = "Pick a suggestion below, or type your own question.";
+// The source's mobile breakpoint (`--breakpoint-tablet`, 764px).
+const PHONE = "(width < 764px)";
 
 /**
  * The product — the source's lab/askpbot web view (DS 5734:* "AskPBot / Web"):
@@ -2397,17 +2401,33 @@ const HERO_SUB = "Pick a suggestion below, or type your own question.";
  * ones: history is always on screen in the rail, so `view` chooses only what
  * fills the main pane. Below the layout, every piece — state machine, stream
  * reader, turns, composer, history — is the code the panel uses.
+ *
+ * On a phone there is no room for a rail beside the pane: the source stacks
+ * them into one long scroll. Here a phone gets the panel's UI instead, filling
+ * the screen — home (card, PBot, New Chat, the saved chats), then a full-screen
+ * chat. Same `pbot` state, so crossing the breakpoint keeps the conversation.
  */
 export function PBotWeb() {
   const pbot = usePBot({ mode: "page" });
   // History comes from localStorage, which the server cannot see. Rendering it
   // only after hydration keeps the first client paint identical to the server's.
   const hydrated = useIsHydrated();
+  // null until hydrated: the server cannot see the viewport. That first paint
+  // is the web layout, which pbot-host.css hides on a phone so it never flashes.
+  const phone = useMediaQuery(PHONE);
   useButtonBounce();
   const inChat = pbot.view === "chat";
 
+  if (phone) {
+    return (
+      <main className={`pbot-panel pbot-panel--fill is-open ${inChat ? "is-chat" : ""}`} aria-label="Ask PBot">
+        <PBotPanelBody pbot={pbot} />
+      </main>
+    );
+  }
+
   return (
-    <div className="pbot-page">
+    <div className={`pbot-page ${phone === null ? "is-pending" : ""}`}>
       <div className="pbot-web-shell">
         <div className="pbot-web is-ask">
           {/* The scene's three spheres and its sky (6191:22462 · 5763:87648).
@@ -2856,13 +2876,46 @@ export function useIsHydrated(): boolean {
 }
 ```
 
+#### `components/pbot/useMediaQuery.ts`  
+_27 lines_
+
+```ts
+"use client";
+
+import { useCallback, useSyncExternalStore } from "react";
+
+/**
+ * Whether `query` matches, or `null` on the server and during hydration.
+ *
+ * `null` rather than a guess: the server cannot know the viewport, and a guess
+ * that turns out wrong swaps the whole layout under the user's thumb. Callers
+ * render a neutral first paint for `null` instead. Same shape as
+ * `useIsHydrated`, and for the same reason — no `useState` + `useEffect`.
+ */
+export function useMediaQuery(query: string): boolean | null {
+  const subscribe = useCallback(
+    (notify: () => void) => {
+      const list = window.matchMedia(query);
+      list.addEventListener("change", notify);
+      return () => list.removeEventListener("change", notify);
+    },
+    [query],
+  );
+  return useSyncExternalStore(
+    subscribe,
+    () => window.matchMedia(query).matches,
+    () => null,
+  );
+}
+```
+
 #### `components/pbot/PBotPanel.tsx`  
-_142 lines_
+_171 lines_
 
 ```tsx
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type Ref } from "react";
 import { createPortal } from "react-dom";
 import { useButtonBounce } from "./behaviors";
 import { Btn, Icon, IconLink } from "./ds";
@@ -2924,82 +2977,111 @@ export function PBotPanel({ side = "right" }: { side?: "left" | "right" }) {
         // panel's controls aren't reachable behind the page.
         {...(pbot.isOpen ? {} : { inert: true, "aria-hidden": true })}
       >
-        {/* The scene, back to front (6354:17280 …): wordmark under the two
-            spheres, then the glows. Decoration only. */}
-        <span className="pbot-panel__glow" aria-hidden="true" />
-        <span className="pbot-watermark" aria-hidden="true" />
-        <span className="pbot-orb pbot-orb--panel-lg" aria-hidden="true" />
-        <span className="pbot-orb pbot-orb--panel-sm" aria-hidden="true" />
-        <span className="pbot-glow pbot-glow--panel-a" aria-hidden="true" />
-        <span className="pbot-glow pbot-glow--panel-b" aria-hidden="true" />
-
-        <header className="pbot-panel__head">
-          {/* Maximize (DS 5977:7774) takes the conversation to the full page. */}
-          <IconLink href="/" icon="maximize-2" className="pbot-panel__max" label="Open Ask PBot full screen" />
-          <h2 className="pbot-panel__title">Ask Pbot</h2>
-          <button ref={closeRef} className="pbot-panel__close" type="button" onClick={pbot.hide} aria-label="Close">
-            <Icon name="x" size={20} />
-          </button>
-        </header>
-
-        {/* Hero (DS 3274:127527): the Ask PBot card, and PBot on his pod. */}
-        <div className="pbot-hero">
-          <div className="pbot-deck pbot-deck--solo">
-            <span className="pbot-deck__card pbot-deck__card--ask is-front">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/pbot/askpbot/tab-ask-active.png" alt="Ask PBot" />
-            </span>
-          </div>
-          <div className="pbot-podium" aria-hidden="true">
-            <span className="pbot-podium__pod">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/pbot/askpbot/mathdrill-pod.png" alt="" />
-            </span>
-            <span className="pbot-podium__mascot">
-              {/* Built only while open: no reason to run a canvas behind a closed panel. */}
-              {pbot.isOpen && <PBotRive size={200} className="pbot-podium__canvas" />}
-            </span>
-          </div>
-        </div>
-
-        <div className="pbot-feature">
-          {inChat ? (
-            <PBotChat
-              layout="panel"
-              title={pbot.title}
-              messages={pbot.messages}
-              status={pbot.status}
-              isStreaming={pbot.isStreaming}
-              error={pbot.error}
-              lastTurn={pbot.lastTurn}
-              copiedId={pbot.copiedId}
-              ratedIds={pbot.ratedIds}
-              onBack={pbot.back}
-              onRename={(next) => pbot.rename(pbot.conversationId!, next)}
-              onSend={pbot.send}
-              onStop={pbot.stop}
-              onRegenerate={pbot.regenerate}
-              onCopy={pbot.copy}
-              onRate={pbot.rate}
-            />
-          ) : (
-            // Home: New Chat, then the saved chats (or the empty state).
-            <div className="pbot-home">
-              <Btn variant="primary" size="l" block iconEnd="chevron-btn-m" onClick={pbot.newChat}>
-                Start a New Chat
-              </Btn>
-              <PBotHistory
-                history={pbot.history}
-                onOpenChat={pbot.openChat}
-                onRename={pbot.rename}
-                onDelete={pbot.removeConversation}
-              />
-            </div>
-          )}
-        </div>
+        <PBotPanelBody pbot={pbot} closeRef={closeRef} />
       </aside>
     </>,
     document.body,
+  );
+}
+
+/**
+ * Everything inside the panel's frame: the scene, the head, the hero, and home
+ * or chat. Shared by the docked panel and the web page's phone layout (see
+ * `PBotWeb`), which is the panel's UI with no host page to dock over.
+ *
+ * With no `closeRef` there is nothing to close to, so the head drops both the
+ * close and the maximize — the source's `.pbot-panel--page` does the same.
+ */
+export function PBotPanelBody({
+  pbot,
+  closeRef,
+}: {
+  pbot: ReturnType<typeof usePBot>;
+  closeRef?: Ref<HTMLButtonElement>;
+}) {
+  const inChat = pbot.view === "chat";
+  const docked = closeRef !== undefined;
+
+  return (
+    <>
+      {/* The scene, back to front (6354:17280 …): wordmark under the two
+          spheres, then the glows. Decoration only. */}
+      <span className="pbot-panel__glow" aria-hidden="true" />
+      <span className="pbot-watermark" aria-hidden="true" />
+      <span className="pbot-orb pbot-orb--panel-lg" aria-hidden="true" />
+      <span className="pbot-orb pbot-orb--panel-sm" aria-hidden="true" />
+      <span className="pbot-glow pbot-glow--panel-a" aria-hidden="true" />
+      <span className="pbot-glow pbot-glow--panel-b" aria-hidden="true" />
+
+      <header className="pbot-panel__head">
+        {/* Maximize (DS 5977:7774) takes the conversation to the full page. */}
+        {docked && (
+          <IconLink href="/" icon="maximize-2" className="pbot-panel__max" label="Open Ask PBot full screen" />
+        )}
+        <h2 className="pbot-panel__title">Ask Pbot</h2>
+        {docked && (
+          <button ref={closeRef} className="pbot-panel__close" type="button" onClick={pbot.hide} aria-label="Close">
+            <Icon name="x" size={20} />
+          </button>
+        )}
+      </header>
+
+      {/* Hero (DS 3274:127527): the Ask PBot card, and PBot on his pod. */}
+      <div className="pbot-hero">
+        <div className="pbot-deck pbot-deck--solo">
+          <span className="pbot-deck__card pbot-deck__card--ask is-front">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/pbot/askpbot/tab-ask-active.png" alt="Ask PBot" />
+          </span>
+        </div>
+        <div className="pbot-podium" aria-hidden="true">
+          <span className="pbot-podium__pod">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/pbot/askpbot/mathdrill-pod.png" alt="" />
+          </span>
+          <span className="pbot-podium__mascot">
+            {/* Built only while open: no reason to run a canvas behind a closed panel. */}
+            {pbot.isOpen && <PBotRive size={200} className="pbot-podium__canvas" />}
+          </span>
+        </div>
+      </div>
+
+      <div className="pbot-feature">
+        {inChat ? (
+          <PBotChat
+            layout="panel"
+            title={pbot.title}
+            messages={pbot.messages}
+            status={pbot.status}
+            isStreaming={pbot.isStreaming}
+            error={pbot.error}
+            lastTurn={pbot.lastTurn}
+            copiedId={pbot.copiedId}
+            ratedIds={pbot.ratedIds}
+            onBack={pbot.back}
+            onRename={(next) => pbot.rename(pbot.conversationId!, next)}
+            onSend={pbot.send}
+            onStop={pbot.stop}
+            onRegenerate={pbot.regenerate}
+            onCopy={pbot.copy}
+            onRate={pbot.rate}
+          />
+        ) : (
+          // Home: New Chat, then the saved chats (or the empty state).
+          <div className="pbot-home">
+            <Btn variant="primary" size="l" block iconEnd="chevron-btn-m" onClick={pbot.newChat}>
+              Start a New Chat
+            </Btn>
+            <PBotHistory
+              history={pbot.history}
+              onOpenChat={pbot.openChat}
+              onRename={pbot.rename}
+              onDelete={pbot.removeConversation}
+            />
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 ```
@@ -4843,7 +4925,7 @@ body {
 
 
 #### `app/pbot-host.css`  
-_156 lines_
+_178 lines_
 
 ```css
 /* ===========================================================================
@@ -4884,6 +4966,28 @@ _156 lines_
 @media (width < 764px) {
   .pbot-page { padding: 8px; }
   .pbot-web { height: auto; }
+}
+
+/* host — the web page below 764px is the panel (PBotWeb). Its size is the
+   source's own: full-bleed to 480px, then the 15px-gutter card at
+   min(412px, …). Only the dock moves — centred, as the source's full-page
+   `.pbot-panel--page` is, since there is no host page to dock against.
+   Do not stretch it full-bleed above 480px: the orbs, the podium and the deck
+   are solved against the panel's ~412px width (see the source's
+   `--orb-sm-y`), and at 600px PBot's pod ends up under the New Chat button. */
+.pbot-panel--fill {
+  left: 0;
+  right: 0;
+  margin-inline: auto;
+}
+/* The first paint, before the viewport is known, is the web layout. Below
+   764px it is about to be swapped for the panel, so it is hidden rather than
+   flashed — over the panel's own ground where the panel is full-bleed. */
+@media (width < 764px) {
+  .pbot-page.is-pending > * { visibility: hidden; }
+}
+@media (max-width: 480px) {
+  .pbot-page.is-pending { background: linear-gradient(to bottom, #002e9c 0%, #0253ef 100%); }
 }
 
 /* host — the scrim is x-show'd in the source; here it is always mounted and
@@ -5007,7 +5111,7 @@ _156 lines_
 `app/pbot.css` below is **generated** by `npm run design:sync` from `pandai.question.uiux` (§6.7). It is inlined because a receiver without that checkout cannot regenerate it.
 
 #### `app/pbot.css`  
-_2572 lines_
+_2583 lines_
 
 ```css
 /* GENERATED by scripts/pbot-design/sync.mjs from pandai.question.uiux@42a250e. Do not edit:
@@ -5106,6 +5210,17 @@ _2572 lines_
     --type-t2-lh: 28px;
     --type-t4: 16px;
     --type-t4-lh: 24px;
+}
+
+@media (width < 764px) {
+:root {
+    --type-t1: 16px;
+    --type-t1-lh: 24px;
+    --type-t2: 16px;
+    --type-t2-lh: 24px;
+    --type-t4: 14px;
+    --type-t4-lh: 20px;
+}
 }
 
 
@@ -8229,7 +8344,7 @@ main().catch((error) => {
 How `app/pbot.css` and `public/pbot/` are produced. The binaries in `public/pbot/` (art, `icons.svg`, `pbot.riv`, `rive.wasm`) are not inlined; copy that directory as-is.
 
 #### `scripts/pbot-design/sync.mjs`  
-_209 lines_
+_229 lines_
 
 ```js
 // Pulls the AskPBot design out of pandai.question.uiux and into this repo.
@@ -8315,6 +8430,9 @@ const usedVars = new Set();
 const usedKeyframes = new Set();
 const keyframes = new Map();
 const rootDecls = new Map();
+// `:root` blocks inside @media — the source's responsive type tiers (headings and titles
+// drop one tier below 764px). Kept for the tokens this port uses, in source order.
+const tieredRoots = [];
 
 function scan(decl) {
   for (const m of decl.value.matchAll(/var\(\s*(--[\w-]+)/g)) usedVars.add(m[1]);
@@ -8323,11 +8441,17 @@ function scan(decl) {
   }
 }
 
-function filter(src, dst, file) {
+function filter(src, dst, file, media = []) {
   src.each((node) => {
     if (node.type === 'rule') {
       if (node.selector.includes(':root')) {
-        if (node.selector.trim() === ':root' && (file === 'tokens' || file === 'base')) {
+        if (node.selector.trim() === ':root' && media.length) {
+          const decls = [];
+          node.walkDecls((d) => {
+            if (d.prop.startsWith('--')) decls.push([d.prop, d.value]);
+          });
+          tieredRoots.push({ media, decls });
+        } else if (node.selector.trim() === ':root' && (file === 'tokens' || file === 'base')) {
           // Braces matter: a walk callback that returns `false` stops the walk.
           node.walkDecls((d) => {
             if (d.prop.startsWith('--')) rootDecls.set(d.prop, d.value);
@@ -8346,7 +8470,7 @@ function filter(src, dst, file) {
       if (node.name.endsWith('keyframes')) keyframes.set(node.params.trim(), node);
       else if (['media', 'supports', 'container'].includes(node.name) && !/prefers-color-scheme/.test(node.params)) {
         const at = node.clone({ nodes: [] });
-        filter(node, at, file);
+        filter(node, at, file, [...media, `@${node.name} ${node.params}`]);
         if (at.nodes.length) { at.raws.before = '\n\n'; dst.append(at); }
       }
     }
@@ -8384,6 +8508,16 @@ for (let grew = true; grew; ) {
   }
 }
 
+// A tier only restates base tokens, so it keeps exactly the ones the base block kept. The
+// token walk above stays the only thing that decides what is "used".
+const tiers = tieredRoots
+  .map(({ media, decls }) => ({ media, decls: decls.filter(([k]) => tokens.has(k)) }))
+  .filter(({ decls }) => decls.length)
+  .map(({ media, decls }) => {
+    const body = [':root {', ...decls.map(([k, v]) => `    ${k}: ${v};`), '}'];
+    return [...media.map((m) => `${m} {`), ...body, ...media.map(() => '}')].join('\n');
+  });
+
 const commit = execSync('git rev-parse --short HEAD', { cwd: UIUX }).toString().trim();
 const cssAssets = new Set();
 let out = [
@@ -8393,6 +8527,7 @@ let out = [
   ':root {',
   ...[...tokens].sort().map(([k, v]) => `    ${k}: ${v};`),
   '}',
+  ...tiers.map((t) => `\n${t}`),
   ...body,
   '\n\n/* ── keyframes ── */\n',
   frames.join('\n\n'),

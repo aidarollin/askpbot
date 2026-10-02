@@ -38,6 +38,51 @@ Entry shape: **Done / Decided / Blocked / Next**.
 
 ---
 
+## 2026-10-02 (later) — On a phone, `/` is the panel
+
+**Done**
+
+- Asked for: on mobile, follow the source's UI for AskPBot *in the panel*.
+  Checked first: `/embed`'s panel at 390px already matched the source's panel
+  element for element. The gap was `/`, which on a phone stacked the rail over
+  the pane into one long scroll (the source's lab page does the same).
+- Below 764px, `/` now renders the panel's UI from the same `usePBot` state:
+  home, then a full-screen chat. `PBotPanel`'s inside became `PBotPanelBody`,
+  shared by the docked panel and the phone page, so they cannot drift.
+- Found and fixed a sync gap: `sync.mjs` dropped every `:root` inside `@media`,
+  so the source's mobile type tier never came over — panel titles were 18px
+  where the source draws 16px. It now carries those tiers for the tokens in
+  use. Re-synced from the same `42a250e`; the only change in `pbot.css` is that
+  tier.
+- Verified: `npm run check` 8/8, `npm run build:next`, and a scripted browser
+  run at four phone widths — details in RELIABILITY.md.
+
+**Decided**
+
+- **Full-bleed only to 480px, then the source's 412px card, centred.** Tried
+  full-bleed up to 764px first: at 600px PBot's pod sank under the New Chat
+  button, because the orb, podium and deck are solved against the panel's
+  ~412px width. Centred, not docked right, as the source's `.pbot-panel--page`
+  does — there is no host page to dock against.
+- **No close or maximize on the phone page.** There is nothing to close to or
+  maximize into; the source's full-page variant drops them too.
+- **The viewport is unknown until hydration, and the first paint does not
+  guess.** It renders the web layout, which CSS hides below 764px so a phone
+  never sees it flash. Cost: with JavaScript off, a phone gets a blank blue page
+  — but nothing here works without JavaScript anyway.
+
+**Blocked**
+
+- Nothing new. The Worker build (`npm run build`) was not re-run for this
+  change: a running dev server held `workerd`.
+
+**Next**
+
+- Someone tries it on a real phone — the soft keyboard over a `position: fixed`
+  full-screen panel is untested.
+
+---
+
 ## 2026-10-02 — The design re-synced from the source; markdown, rename and voice in
 
 **Done**

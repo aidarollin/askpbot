@@ -6,14 +6,18 @@ import { Btn } from "./ds";
 import { PBotChat } from "./PBotChat";
 import { PBotComposer } from "./PBotComposer";
 import { PBotHistory } from "./PBotHistory";
+import { PBotPanelBody } from "./PBotPanel";
 import { PBotRive } from "./PBotRive";
 import { PBotHeroPrompts } from "./PBotSuggestions";
 import { PBotTitle } from "./PBotTitle";
 import { useIsHydrated } from "./useIsHydrated";
+import { useMediaQuery } from "./useMediaQuery";
 import { usePBot } from "./usePBot";
 
 const HERO_TITLE = "What shall we learn today?";
 const HERO_SUB = "Pick a suggestion below, or type your own question.";
+// The source's mobile breakpoint (`--breakpoint-tablet`, 764px).
+const PHONE = "(width < 764px)";
 
 /**
  * The product — the source's lab/askpbot web view (DS 5734:* "AskPBot / Web"):
@@ -25,17 +29,33 @@ const HERO_SUB = "Pick a suggestion below, or type your own question.";
  * ones: history is always on screen in the rail, so `view` chooses only what
  * fills the main pane. Below the layout, every piece — state machine, stream
  * reader, turns, composer, history — is the code the panel uses.
+ *
+ * On a phone there is no room for a rail beside the pane: the source stacks
+ * them into one long scroll. Here a phone gets the panel's UI instead, filling
+ * the screen — home (card, PBot, New Chat, the saved chats), then a full-screen
+ * chat. Same `pbot` state, so crossing the breakpoint keeps the conversation.
  */
 export function PBotWeb() {
   const pbot = usePBot({ mode: "page" });
   // History comes from localStorage, which the server cannot see. Rendering it
   // only after hydration keeps the first client paint identical to the server's.
   const hydrated = useIsHydrated();
+  // null until hydrated: the server cannot see the viewport. That first paint
+  // is the web layout, which pbot-host.css hides on a phone so it never flashes.
+  const phone = useMediaQuery(PHONE);
   useButtonBounce();
   const inChat = pbot.view === "chat";
 
+  if (phone) {
+    return (
+      <main className={`pbot-panel pbot-panel--fill is-open ${inChat ? "is-chat" : ""}`} aria-label="Ask PBot">
+        <PBotPanelBody pbot={pbot} />
+      </main>
+    );
+  }
+
   return (
-    <div className="pbot-page">
+    <div className={`pbot-page ${phone === null ? "is-pending" : ""}`}>
       <div className="pbot-web-shell">
         <div className="pbot-web is-ask">
           {/* The scene's three spheres and its sky (6191:22462 · 5763:87648).

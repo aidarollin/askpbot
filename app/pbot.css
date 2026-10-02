@@ -96,6 +96,17 @@
     --type-t4-lh: 24px;
 }
 
+@media (width < 764px) {
+:root {
+    --type-t1: 16px;
+    --type-t1-lh: 24px;
+    --type-t2: 16px;
+    --type-t2-lh: 24px;
+    --type-t4: 14px;
+    --type-t4-lh: 20px;
+}
+}
+
 
 /* ── resources/css/pandai/components.css ── */
 

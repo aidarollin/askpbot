@@ -38,6 +38,28 @@
   .pbot-web { height: auto; }
 }
 
+/* host — the web page below 764px is the panel (PBotWeb). Its size is the
+   source's own: full-bleed to 480px, then the 15px-gutter card at
+   min(412px, …). Only the dock moves — centred, as the source's full-page
+   `.pbot-panel--page` is, since there is no host page to dock against.
+   Do not stretch it full-bleed above 480px: the orbs, the podium and the deck
+   are solved against the panel's ~412px width (see the source's
+   `--orb-sm-y`), and at 600px PBot's pod ends up under the New Chat button. */
+.pbot-panel--fill {
+  left: 0;
+  right: 0;
+  margin-inline: auto;
+}
+/* The first paint, before the viewport is known, is the web layout. Below
+   764px it is about to be swapped for the panel, so it is hidden rather than
+   flashed — over the panel's own ground where the panel is full-bleed. */
+@media (width < 764px) {
+  .pbot-page.is-pending > * { visibility: hidden; }
+}
+@media (max-width: 480px) {
+  .pbot-page.is-pending { background: linear-gradient(to bottom, #002e9c 0%, #0253ef 100%); }
+}
+
 /* host — the scrim is x-show'd in the source; here it is always mounted and
    fades on `is-open`. */
 .pbot-scrim {

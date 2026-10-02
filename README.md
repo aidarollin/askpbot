@@ -77,6 +77,11 @@ in one is in the other's history.
   card, *Start a New Chat* and the grouped history, beside a main pane with one
   top bar over either the idle hero (PBot waving, the question typed in,
   starter prompts, a composer) or the open conversation.
+- **The panel's UI on a phone** — below 764px, `/` is the panel itself rather
+  than the two columns stacked: home (the card, PBot on his pod, *Start a New
+  Chat*, the saved chats), then a full-screen chat. Full-bleed to 480px, the
+  source's 412px card centred above that. Same state, so resizing across the
+  line keeps the open conversation.
 - **Starter prompts** — four chips, on the hero and inside any conversation
   that has no question yet. A hero chip opens the conversation and asks in one
   press.
@@ -132,8 +137,9 @@ lib/
   log.ts                   structured turn + feedback logging
   types.ts                 wire types + stream event union
 components/pbot/
-  PBotWeb.tsx              the web page: rail, top bar, idle hero
-  PBotPanel.tsx            the docked panel: portal, scrim, home, focus management
+  PBotWeb.tsx              the web page: rail, top bar, idle hero; the panel UI on a phone
+  PBotPanel.tsx            the docked panel: portal, scrim, focus management; and
+                           PBotPanelBody, its inside (hero, home, chat), shared with the phone page
   PBotChat.tsx             the chat screen both surfaces share
   PBotTurn.tsx             one turn: text / markdown / image / voice bubble + actions
   PBotComposer.tsx         field, send/stop, image, voice bar (chat + hero variants)
@@ -148,6 +154,7 @@ components/pbot/
   behaviors.ts             button bounce, scroll-edge fades, typewriter
   useVoice.ts              recorder, waveform, transcription, playback
   usePBot.ts               the state machine + NDJSON stream reader
+  useMediaQuery.ts         a media query as an external store (null until hydrated)
 scripts/pbot-design/
   sync.mjs                 pulls CSS, art, icons and the Rive file from the source
   collect-classes.mjs      records which classes the source renders (input to sync)
@@ -185,8 +192,10 @@ supplied. On 2026-10-02 it was replaced by a pipeline:
    grep of the Blade files, because `<x-btn>` expands into classes the templates
    never mention.
 2. `npm run design:sync` keeps every source rule whose selector uses only those
-   classes, plus the design tokens and keyframes they reference, and writes
-   `app/pbot.css` with a header naming the source commit. It copies the art the
+   classes, plus the design tokens and keyframes they reference — and the
+   source's responsive tiers of those tokens (`:root` inside `@media`, e.g.
+   titles dropping 18px → 16px below 764px) — and writes `app/pbot.css` with a
+   header naming the source commit. It copies the art the
    rules and the components reference into `public/pbot/`, cuts the 424KB icon
    sprite down to the 17 glyphs used, and copies `pbot.riv`.
 3. The React components emit the **source's markup, class for class**, so those
@@ -233,6 +242,7 @@ thumbs-up, which reaches `/api/feedback`.
 | Hero copy in Malay ("Apa kita nak belajar hari ini?") | English | The persona is tuned and evaluated in English; see *Internationalisation* in SCOPE.md |
 | The student's real avatar | The DS's illustrated default | No accounts here, so no one to picture |
 | The rail's tab deck toggles Ask PBot ⇄ Math Drill | One card, not a control | Math Drill is not built |
+| Below 764px the lab page stacks the rail above the pane — one long scroll, the chat a screen down | `/` renders the panel's UI instead: the source's phone panel to 480px, its 412px card centred above, with no close or maximize | Asked for on 2026-10-02. The panel is the source's own phone design; on a full page there is nothing to close to or maximize into, as the source's `.pbot-panel--page` also drops them |
 | PBot's Rive WASM from the package default (unpkg) | Self-hosted at `/pbot/rive/rive.wasm` | No third-party fetch on page load. `@rive-app/canvas` is pinned exact because the WASM is copied from it |
 
 **Dropped** — each with its reason in [docs/SCOPE.md](docs/SCOPE.md):
